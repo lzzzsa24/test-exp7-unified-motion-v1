@@ -15,6 +15,7 @@
 #define LIFT_TEST_OUTER_ONLY_MS           300U
 #define LIFT_TEST_CENTER_CAPTURE_MS       450U
 #define LIFT_TEST_FINAL_CENTER_MS         350U
+#define LIFT_TEST_MAX_CAPTURE_PAUSE_MS     120U
 
 enum
 {
@@ -24,7 +25,8 @@ enum
   LIFT_TEST_FAIL_OUTER_NOT_SEARCHING = 0x08U,
   LIFT_TEST_FAIL_ENCODER_DIRECTION = 0x10U,
   LIFT_TEST_FAIL_CENTER_NOT_CAPTURED = 0x20U,
-  LIFT_TEST_FAIL_DRIVE_BASE = 0x40U
+  LIFT_TEST_FAIL_DRIVE_BASE = 0x40U,
+  LIFT_TEST_FAIL_CAPTURE_PAUSE = 0x80U
 };
 
 typedef struct
@@ -33,6 +35,8 @@ typedef struct
   uint32_t valid_samples;
   uint32_t forward_samples;
   uint32_t wrong_samples;
+  uint32_t first_forward_ms;
+  uint8_t first_forward_seen;
 } LiftPhaseStats;
 
 static LineTrackingReading reading_from_mask(uint8_t mask)
@@ -90,6 +94,11 @@ static void run_phase(uint8_t mask,
       if (command.left_cps > 0L && command.right_cps > 0L)
       {
         ++stats->forward_samples;
+        if (stats->first_forward_seen == 0U)
+        {
+          stats->first_forward_seen = 1U;
+          stats->first_forward_ms = HAL_GetTick() - started;
+        }
       }
       if (require_search_ownership != 0U)
       {
@@ -185,6 +194,11 @@ void LineTrackingLiftTest_Run(void)
   {
     fail_mask |= LIFT_TEST_FAIL_CENTER_NOT_CAPTURED;
   }
+  if (capture.first_forward_seen == 0U ||
+      capture.first_forward_ms > LIFT_TEST_MAX_CAPTURE_PAUSE_MS)
+  {
+    fail_mask |= LIFT_TEST_FAIL_CAPTURE_PAUSE;
+  }
 
   DriveBase_GetTelemetry(&telemetry);
   if (telemetry.fault_mask != 0U)
@@ -205,6 +219,15 @@ void LineTrackingLiftTest_Run(void)
   DiagnosticUart_WriteString("\r\n");
   DiagnosticUart_WriteString("LTST CAPTURE valid=");
   DiagnosticUart_WriteUnsigned(capture.valid_samples);
+  DiagnosticUart_WriteString(" first-ms=");
+  if (capture.first_forward_seen != 0U)
+  {
+    DiagnosticUart_WriteUnsigned(capture.first_forward_ms);
+  }
+  else
+  {
+    DiagnosticUart_WriteString("NONE");
+  }
   DiagnosticUart_WriteString(" final-forward=");
   DiagnosticUart_WriteUnsigned(final_center.forward_samples);
   DiagnosticUart_WriteString("\r\n");

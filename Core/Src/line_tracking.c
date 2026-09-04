@@ -376,6 +376,7 @@ LineTrackingAction line_tracking_compute(const LineTrackingReading *reading,
 
   if (recovery_state == LINE_RECOVERY_BRAKE_CAPTURE)
   {
+    DriveBaseTelemetry drive_telemetry;
     EncoderTurnState turn_state;
     LineTrackingAction search_action = recovery_turn_direction < 0
                                      ? LINE_ACTION_SEARCH_LEFT
@@ -386,6 +387,24 @@ LineTrackingAction line_tracking_compute(const LineTrackingReading *reading,
     turn_state = EncoderTurn_GetState();
     if (turn_state == ENCODER_TURN_RUNNING)
     {
+      DriveBase_GetTelemetry(&drive_telemetry);
+      if (drive_telemetry.mode == DRIVE_BASE_STOPPED &&
+          drive_telemetry.position_state == DRIVE_POSITION_SETTLING)
+      {
+        /* DriveBase has completed the 30 ms direction guard and bounded
+           22 ms reverse-torque pulse.  The generic position controller would
+           now wait another 90 ms before reporting DONE, but line capture does
+           not need that duplicate stationary observation.  Cancel only this
+           remaining position settle and hand the wheels to low-speed tracking
+           on the next control pass. */
+        EncoderTurn_Stop();
+        command_stop(command);
+        recovery_state = center_visible != 0U
+                       ? LINE_RECOVERY_SETTLE
+                       : LINE_RECOVERY_WAIT_SEARCH;
+        recovery_state_started_ms = now;
+        return LINE_ACTION_STOP;
+      }
       return search_action;
     }
 
@@ -397,7 +416,7 @@ LineTrackingAction line_tracking_compute(const LineTrackingReading *reading,
     }
     else if (center_visible != 0U)
     {
-      recovery_state = LINE_RECOVERY_WAIT_FORWARD;
+      recovery_state = LINE_RECOVERY_SETTLE;
     }
     else
     {
@@ -414,7 +433,9 @@ LineTrackingAction line_tracking_compute(const LineTrackingReading *reading,
     command_stop(command);
     if (center_visible != 0U)
     {
-      recovery_state = LINE_RECOVERY_WAIT_FORWARD;
+      /* Already stationary: resume with the bounded low-speed capture
+         directly instead of inserting another direction guard. */
+      recovery_state = LINE_RECOVERY_SETTLE;
       recovery_state_started_ms = now;
       return LINE_ACTION_STOP;
     }
@@ -462,7 +483,7 @@ LineTrackingAction line_tracking_compute(const LineTrackingReading *reading,
     command_stop(command);
     if (center_visible != 0U)
     {
-      recovery_state = LINE_RECOVERY_WAIT_FORWARD;
+      recovery_state = LINE_RECOVERY_SETTLE;
       recovery_state_started_ms = now;
     }
     return LINE_ACTION_STOP;
