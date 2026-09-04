@@ -50,6 +50,11 @@ static LineTrackingReading reading_from_mask(uint8_t mask)
   return reading;
 }
 
+static int32_t abs_i32(int32_t value)
+{
+  return value < 0L ? -value : value;
+}
+
 static void apply_command(const LineTrackingCommand *command)
 {
   if (command == 0 || command->valid == 0U)
@@ -159,7 +164,7 @@ void LineTrackingLiftTest_Run(void)
     fail_mask |= LIFT_TEST_FAIL_INITIAL_FORWARD;
   }
 
-  /* All white starts the encoder-bounded left in-place search. */
+  /* All white starts the encoder-bounded left rear-pivot search. */
   run_phase(0x00U, LIFT_TEST_LOST_SEARCH_MS, 0U, &lost);
   if (lost.search_samples == 0U)
   {
@@ -179,9 +184,9 @@ void LineTrackingLiftTest_Run(void)
     fail_mask |= LIFT_TEST_FAIL_OUTER_NOT_SEARCHING;
   }
   if (outer_end.motor1 >= outer_start.motor1 - 20L ||
-      outer_end.motor2 >= outer_start.motor2 - 20L ||
       outer_end.motor3 <= outer_start.motor3 + 20L ||
-      outer_end.motor4 <= outer_start.motor4 + 20L)
+      abs_i32(outer_end.motor2 - outer_start.motor2) > 20L ||
+      abs_i32(outer_end.motor4 - outer_start.motor4) > 20L)
   {
     fail_mask |= LIFT_TEST_FAIL_ENCODER_DIRECTION;
   }

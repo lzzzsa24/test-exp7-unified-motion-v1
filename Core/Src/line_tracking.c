@@ -2,8 +2,8 @@
  * 实验七：PF13/PF14/PF15/PG0 四路数字循迹
  *
  * 传感器输出低电平表示黑线。该文件是黑线位置外环，只生成左右目标
- * CPS；DriveBase 使用四路编码器形成各轮速度内环。丢线 360 度搜索则
- * 通过 EncoderTurn 请求四轮位置闭环。
+ * CPS；DriveBase 使用四路编码器形成各轮速度内环。丢线 360 度上限搜索
+ * 通过 EncoderTurn 请求前轮位置闭环，后轮保持零输出以近似后轴支点扫线。
  */
 
 #include "line_tracking.h"
@@ -446,8 +446,8 @@ LineTrackingAction line_tracking_compute(const LineTrackingReading *reading,
                            ? TRACKING_SEARCH_ANGLE_MDEG
                            : -TRACKING_SEARCH_ANGLE_MDEG;
 
-      if (EncoderTurn_Start(search_angle, 0L,
-                            TRACKING_SEARCH_TURN_CPS) != 0U)
+      if (EncoderTurn_StartRearPivot(search_angle,
+                                     TRACKING_SEARCH_TURN_CPS) != 0U)
       {
         recovery_center_candidate = 0U;
         recovery_state = LINE_RECOVERY_TURN_SEARCH;
