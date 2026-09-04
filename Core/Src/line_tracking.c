@@ -22,6 +22,8 @@ static int8_t recovery_turn_direction;
 static int8_t last_turn_direction;
 static int8_t outer_turn_direction;
 static uint32_t outer_turn_started_ms;
+static uint8_t recovery_center_candidate;
+static uint32_t recovery_center_since_ms;
 static uint8_t smooth_mode_enabled;
 static uint8_t smooth_filter_valid;
 static int16_t smooth_error_q8;
@@ -38,6 +40,7 @@ typedef enum
   LINE_RECOVERY_NORMAL = 0U,
   LINE_RECOVERY_WAIT_SEARCH,
   LINE_RECOVERY_TURN_SEARCH,
+  LINE_RECOVERY_BRAKE_CAPTURE,
   LINE_RECOVERY_STOPPED,
   LINE_RECOVERY_WAIT_FORWARD,
   LINE_RECOVERY_SETTLE
@@ -48,7 +51,8 @@ static uint32_t recovery_state_started_ms;
 
 #define TRACKING_DIRECTION_GUARD_MS          70U
 #define TRACKING_SEARCH_ANGLE_MDEG         360000L
-#define TRACKING_SEARCH_TURN_CPS             1800L
+#define TRACKING_SEARCH_TURN_CPS             3600L
+#define TRACKING_SEARCH_CENTER_CONFIRM_MS      12U
 #define TRACKING_REACQUIRE_SETTLE_MS         250U
 #define TRACKING_MIN_INNER_PWM             2200
 #define TRACKING_MIN_OUTER_PWM             3000
@@ -173,7 +177,8 @@ void line_tracking_init(void)
 
 void line_tracking_reset(void)
 {
-  if (recovery_state == LINE_RECOVERY_TURN_SEARCH)
+  if (recovery_state == LINE_RECOVERY_TURN_SEARCH ||
+      recovery_state == LINE_RECOVERY_BRAKE_CAPTURE)
   {
     EncoderTurn_Stop();
   }
@@ -185,6 +190,8 @@ void line_tracking_reset(void)
   last_turn_direction = 0;
   outer_turn_direction = 0;
   outer_turn_started_ms = HAL_GetTick();
+  recovery_center_candidate = 0U;
+  recovery_center_since_ms = HAL_GetTick();
   smooth_filter_valid = 0U;
   smooth_error_q8 = 0;
   smooth_previous_error_q8 = 0;
@@ -250,6 +257,7 @@ LineTrackingAction line_tracking_compute(const LineTrackingReading *reading,
   int16_t weighted_sum;
   int16_t line_position;
   uint8_t active_count;
+  uint8_t center_visible;
   uint8_t settling = 0U;
   uint32_t now = HAL_GetTick();
 
@@ -267,6 +275,11 @@ LineTrackingAction line_tracking_compute(const LineTrackingReading *reading,
 
   active_count = (uint8_t)(reading->x1_black + reading->x2_black +
                            reading->x3_black + reading->x4_black);
+  center_visible = (reading->x1_black || reading->x3_black) ? 1U : 0U;
+  if (active_count != 0U)
+  {
+    line_has_been_seen = 1U;
+  }
 
   /* 在正常寻线阶段记录中间两路离开黑线的先后顺序。X3（右中）
      先丢而 X1 仍在，说明线向左弯；X1 先丢则说明线向右弯。 */
@@ -300,6 +313,159 @@ LineTrackingAction line_tracking_compute(const LineTrackingReading *reading,
       }
       middle_pair_armed = 0U;
     }
+  }
+
+  /* A lost-line search owns DriveBase until a middle sensor sees the line.
+     X2/X4 are only an early warning: releasing the in-place turn on an outer
+     hit made the car creep forward, lose the line again, and repeat. */
+  if (recovery_state == LINE_RECOVERY_TURN_SEARCH)
+  {
+    EncoderTurnState turn_state;
+    LineTrackingAction search_action = recovery_turn_direction < 0
+                                     ? LINE_ACTION_SEARCH_LEFT
+                                     : LINE_ACTION_SEARCH_RIGHT;
+
+    command_release_to_position(command, search_action);
+    EncoderTurn_Task();
+    turn_state = EncoderTurn_GetState();
+    if (turn_state == ENCODER_TURN_DONE ||
+        turn_state == ENCODER_TURN_FAULT)
+    {
+      EncoderTurn_Stop();
+      recovery_center_candidate = 0U;
+      recovery_state = LINE_RECOVERY_STOPPED;
+      recovery_state_started_ms = now;
+      command_stop(command);
+      return LINE_ACTION_STOP;
+    }
+
+    if (center_visible != 0U)
+    {
+      if (recovery_center_candidate == 0U)
+      {
+        recovery_center_candidate = 1U;
+        recovery_center_since_ms = now;
+      }
+      else if (now - recovery_center_since_ms >=
+               TRACKING_SEARCH_CENTER_CONFIRM_MS)
+      {
+        recovery_center_candidate = 0U;
+        if (EncoderTurn_RequestStop() != 0U)
+        {
+          /* Keep valid=0 while DriveBase applies its bounded active brake and
+             encoder settle; speed mode must not overwrite that sequence. */
+          recovery_state = LINE_RECOVERY_BRAKE_CAPTURE;
+          recovery_state_started_ms = now;
+          return search_action;
+        }
+
+        EncoderTurn_Stop();
+        recovery_state = LINE_RECOVERY_WAIT_FORWARD;
+        recovery_state_started_ms = now;
+        command_stop(command);
+        return LINE_ACTION_STOP;
+      }
+    }
+    else
+    {
+      recovery_center_candidate = 0U;
+    }
+
+    return search_action;
+  }
+
+  if (recovery_state == LINE_RECOVERY_BRAKE_CAPTURE)
+  {
+    EncoderTurnState turn_state;
+    LineTrackingAction search_action = recovery_turn_direction < 0
+                                     ? LINE_ACTION_SEARCH_LEFT
+                                     : LINE_ACTION_SEARCH_RIGHT;
+
+    command_release_to_position(command, search_action);
+    EncoderTurn_Task();
+    turn_state = EncoderTurn_GetState();
+    if (turn_state == ENCODER_TURN_RUNNING)
+    {
+      return search_action;
+    }
+
+    EncoderTurn_Stop();
+    command_stop(command);
+    if (turn_state == ENCODER_TURN_FAULT)
+    {
+      recovery_state = LINE_RECOVERY_STOPPED;
+    }
+    else if (center_visible != 0U)
+    {
+      recovery_state = LINE_RECOVERY_WAIT_FORWARD;
+    }
+    else
+    {
+      /* Braking inertia moved the line away again. Resume the same predicted
+         direction instead of issuing a short forward command. */
+      recovery_state = LINE_RECOVERY_WAIT_SEARCH;
+    }
+    recovery_state_started_ms = now;
+    return LINE_ACTION_STOP;
+  }
+
+  if (recovery_state == LINE_RECOVERY_WAIT_SEARCH)
+  {
+    command_stop(command);
+    if (center_visible != 0U)
+    {
+      recovery_state = LINE_RECOVERY_WAIT_FORWARD;
+      recovery_state_started_ms = now;
+      return LINE_ACTION_STOP;
+    }
+
+    if (now - recovery_state_started_ms >= TRACKING_DIRECTION_GUARD_MS)
+    {
+      int32_t search_angle = recovery_turn_direction < 0
+                           ? TRACKING_SEARCH_ANGLE_MDEG
+                           : -TRACKING_SEARCH_ANGLE_MDEG;
+
+      if (EncoderTurn_Start(search_angle, 0L,
+                            TRACKING_SEARCH_TURN_CPS) != 0U)
+      {
+        recovery_center_candidate = 0U;
+        recovery_state = LINE_RECOVERY_TURN_SEARCH;
+        recovery_state_started_ms = now;
+        command_release_to_position(command,
+            recovery_turn_direction < 0 ? LINE_ACTION_SEARCH_LEFT
+                                        : LINE_ACTION_SEARCH_RIGHT);
+      }
+      else
+      {
+        recovery_state = LINE_RECOVERY_STOPPED;
+      }
+    }
+    return LINE_ACTION_STOP;
+  }
+
+  /* During the stationary guard and low-speed settle, an outer-only hit is
+     still not a captured line. Re-enter the same-direction search without
+     allowing the old forward/arc command to produce a one-step lurch. */
+  if ((recovery_state == LINE_RECOVERY_WAIT_FORWARD ||
+       recovery_state == LINE_RECOVERY_SETTLE) &&
+      center_visible == 0U)
+  {
+    command_stop(command);
+    recovery_center_candidate = 0U;
+    recovery_state = LINE_RECOVERY_WAIT_SEARCH;
+    recovery_state_started_ms = now;
+    return LINE_ACTION_STOP;
+  }
+
+  if (recovery_state == LINE_RECOVERY_STOPPED)
+  {
+    command_stop(command);
+    if (center_visible != 0U)
+    {
+      recovery_state = LINE_RECOVERY_WAIT_FORWARD;
+      recovery_state_started_ms = now;
+    }
+    return LINE_ACTION_STOP;
   }
 
   if (active_count == 0U)
@@ -336,59 +502,9 @@ LineTrackingAction line_tracking_compute(const LineTrackingReading *reading,
       recovery_state = recovery_turn_direction != 0
                      ? LINE_RECOVERY_WAIT_SEARCH
                      : LINE_RECOVERY_STOPPED;
+      recovery_center_candidate = 0U;
       recovery_state_started_ms = now;
       return LINE_ACTION_STOP;
-    }
-
-    if (recovery_state == LINE_RECOVERY_WAIT_SEARCH)
-    {
-      command_stop(command);
-      if (now - recovery_state_started_ms >= TRACKING_DIRECTION_GUARD_MS)
-      {
-        int32_t search_angle = recovery_turn_direction < 0
-                             ? TRACKING_SEARCH_ANGLE_MDEG
-                             : -TRACKING_SEARCH_ANGLE_MDEG;
-
-        if (EncoderTurn_Start(search_angle, 0L,
-                              TRACKING_SEARCH_TURN_CPS) != 0U)
-        {
-          recovery_state = LINE_RECOVERY_TURN_SEARCH;
-          recovery_state_started_ms = now;
-          command_release_to_position(command, LINE_ACTION_STOP);
-        }
-        else
-        {
-          recovery_state = LINE_RECOVERY_STOPPED;
-        }
-      }
-      return LINE_ACTION_STOP;
-    }
-
-    if (recovery_state == LINE_RECOVERY_TURN_SEARCH)
-    {
-      EncoderTurnState turn_state;
-
-      command_release_to_position(
-          command,
-          recovery_turn_direction < 0 ? LINE_ACTION_SEARCH_LEFT :
-                                        LINE_ACTION_SEARCH_RIGHT);
-      EncoderTurn_Task();
-      turn_state = EncoderTurn_GetState();
-      if (turn_state == ENCODER_TURN_DONE ||
-          turn_state == ENCODER_TURN_FAULT)
-      {
-        EncoderTurn_Stop();
-        recovery_state = LINE_RECOVERY_STOPPED;
-        recovery_state_started_ms = now;
-        return LINE_ACTION_STOP;
-      }
-
-      if (recovery_turn_direction < 0)
-      {
-        return LINE_ACTION_SEARCH_LEFT;
-      }
-
-      return LINE_ACTION_SEARCH_RIGHT;
     }
 
     if (recovery_state == LINE_RECOVERY_STOPPED)
@@ -398,22 +514,6 @@ LineTrackingAction line_tracking_compute(const LineTrackingReading *reading,
     }
 
     command_stop(command);
-    return LINE_ACTION_STOP;
-  }
-
-  line_has_been_seen = 1U;
-
-  if (recovery_state == LINE_RECOVERY_TURN_SEARCH ||
-      recovery_state == LINE_RECOVERY_WAIT_SEARCH ||
-      recovery_state == LINE_RECOVERY_STOPPED)
-  {
-    if (recovery_state == LINE_RECOVERY_TURN_SEARCH)
-    {
-      EncoderTurn_Stop();
-    }
-    command_stop(command);
-    recovery_state = LINE_RECOVERY_WAIT_FORWARD;
-    recovery_state_started_ms = now;
     return LINE_ACTION_STOP;
   }
 
