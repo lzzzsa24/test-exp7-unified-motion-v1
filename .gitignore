@@ -1,0 +1,33 @@
+# STM32CubeIDE generated build output
+/Debug/
+/Release/
+/manual-build-*/
+
+# Compiler/linker products outside the build folders
+*.o
+*.obj
+*.d
+*.su
+*.cyclo
+*.elf
+*.axf
+*.map
+*.list
+*.hex
+*.bin
+
+# Local backups, logs, and temporary files
+*.bak
+*.log
+*.tmp
+*.temp
+*~
+~$*
+
+# IDE/OS-local state (project metadata under .settings is intentionally tracked)
+/.metadata/
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+.DS_Store

@@ -1,0 +1,13 @@
+* text=auto
+
+*.c text
+*.h text
+*.s text
+*.ld text
+*.ioc text
+*.md text
+*.txt text
+*.ps1 text
+*.hex text
+*.bin binary
+*.elf binary
