@@ -28,12 +28,14 @@ uint8_t EncoderTurn_Start(int32_t angle_mdeg,
                           int32_t center_radius_mm,
                           int32_t maximum_wheel_cps);
 /* Line-sensor sweep which biases the ground pivot toward the rear axle.
- * M1/M3 are the front-left/front-right motors and counter-rotate under
- * position feedback; M2/M4 remain unpowered so the rear tyre contact patch
- * acts as the approximate pivot.  The angle is wheel-derived and still needs
- * ground calibration because skid steering has no fixed geometric pivot. */
+ * M1/M3 are the front-left/front-right motors; the outside front wheel moves
+ * forward at maximum speed while the reversing inside front wheel is scaled
+ * by inner_reverse_percent. M2/M4 remain unpowered so the rear tyre contact
+ * patch acts as the approximate pivot. The forward bias limits unintended
+ * reverse translation when left/right traction differs. */
 uint8_t EncoderTurn_StartRearPivot(int32_t angle_mdeg,
-                                   int32_t maximum_front_wheel_cps);
+                                   int32_t maximum_front_wheel_cps,
+                                   uint16_t inner_reverse_percent);
 void EncoderTurn_Task(void);
 /* Non-blocking early finish for sensor-guided continuous turns.  Motor PWM is
  * removed immediately, encoder sampling remains active through the short

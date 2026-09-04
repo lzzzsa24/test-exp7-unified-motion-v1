@@ -186,7 +186,9 @@ void LineTrackingLiftTest_Run(void)
   if (outer_end.motor1 >= outer_start.motor1 - 20L ||
       outer_end.motor3 <= outer_start.motor3 + 20L ||
       abs_i32(outer_end.motor2 - outer_start.motor2) > 20L ||
-      abs_i32(outer_end.motor4 - outer_start.motor4) > 20L)
+      abs_i32(outer_end.motor4 - outer_start.motor4) > 20L ||
+      outer_end.motor3 - outer_start.motor3 <=
+          abs_i32(outer_end.motor1 - outer_start.motor1) + 20L)
   {
     fail_mask |= LIFT_TEST_FAIL_ENCODER_DIRECTION;
   }

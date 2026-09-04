@@ -52,6 +52,7 @@ static uint32_t recovery_state_started_ms;
 #define TRACKING_DIRECTION_GUARD_MS          70U
 #define TRACKING_SEARCH_ANGLE_MDEG         360000L
 #define TRACKING_SEARCH_TURN_CPS             3600L
+#define TRACKING_SEARCH_INNER_REVERSE_PERCENT   45U
 #define TRACKING_SEARCH_CENTER_CONFIRM_MS      12U
 #define TRACKING_REACQUIRE_SETTLE_MS         250U
 #define TRACKING_MIN_INNER_PWM             2200
@@ -447,7 +448,8 @@ LineTrackingAction line_tracking_compute(const LineTrackingReading *reading,
                            : -TRACKING_SEARCH_ANGLE_MDEG;
 
       if (EncoderTurn_StartRearPivot(search_angle,
-                                     TRACKING_SEARCH_TURN_CPS) != 0U)
+                                     TRACKING_SEARCH_TURN_CPS,
+                                     TRACKING_SEARCH_INNER_REVERSE_PERCENT) != 0U)
       {
         recovery_center_candidate = 0U;
         recovery_state = LINE_RECOVERY_TURN_SEARCH;
