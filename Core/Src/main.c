@@ -33,6 +33,9 @@
 #include "ir_remote.h"
 #include "line_obstacle_bypass.h"
 #include "line_tracking.h"
+#if defined(LINE_TRACKING_LIFT_TEST)
+#include "line_tracking_lift_test.h"
+#endif
 #include "motion_advanced.h"
 #include "motorPWM.h"
 #include "oled_status.h"
@@ -1057,6 +1060,10 @@ int main(void)
   /* 烧录和连线调试期间默认锁存停车；按1/2/3/4后才启动对应功能。 */
   line_tracking_set_no_line_forward(0U);
   line_tracking_reset();
+
+#if defined(LINE_TRACKING_LIFT_TEST)
+  LineTrackingLiftTest_Run();
+#endif
 
   while (1)
   {

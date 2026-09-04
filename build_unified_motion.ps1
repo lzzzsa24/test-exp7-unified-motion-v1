@@ -1,3 +1,7 @@
+param(
+  [switch]$LineTrackingLiftTest
+)
+
 $ErrorActionPreference = 'Stop'
 
 $projectRoot = $PSScriptRoot
@@ -5,7 +9,17 @@ $toolRoot = 'F:\mytool\STM32CubeIDE_1.16.0\STM32CubeIDE\plugins\com.st.stm32cube
 $gcc = Join-Path $toolRoot 'arm-none-eabi-gcc.exe'
 $objcopy = Join-Path $toolRoot 'arm-none-eabi-objcopy.exe'
 $size = Join-Path $toolRoot 'arm-none-eabi-size.exe'
-$buildDir = Join-Path $projectRoot 'manual-build-unified-motion'
+$buildDirName = if ($LineTrackingLiftTest) {
+  'manual-build-line-reacquire-test'
+} else {
+  'manual-build-unified-motion'
+}
+$artifactName = if ($LineTrackingLiftTest) {
+  'line_reacquire_lift_test'
+} else {
+  'exp7_unified_motion'
+}
+$buildDir = Join-Path $projectRoot $buildDirName
 
 if (-not (Test-Path -LiteralPath $gcc)) {
   throw "STM32 compiler not found: $gcc"
@@ -27,6 +41,9 @@ $commonArgs = @(
   '-O0', '-g3', '-ffunction-sections', '-fdata-sections',
   '-Wall', '-fstack-usage', '-MMD', '-MP'
 ) + $includeArgs
+if ($LineTrackingLiftTest) {
+  $commonArgs += '-DLINE_TRACKING_LIFT_TEST'
+}
 
 $coreSources = Get-ChildItem -LiteralPath (Join-Path $projectRoot 'Core\Src') -Filter '*.c' |
   Where-Object { $_.Name -ne 'motor.c' } |
@@ -66,10 +83,10 @@ $startupObject = Join-Path $buildDir 'startup_stm32f103zetx.o'
 if ($LASTEXITCODE -ne 0) { throw 'Startup assembly failed' }
 $objects += $startupObject
 
-$elf = Join-Path $buildDir 'exp7_unified_motion.elf'
-$map = Join-Path $buildDir 'exp7_unified_motion.map'
-$hex = Join-Path $buildDir 'exp7_unified_motion.hex'
-$bin = Join-Path $buildDir 'exp7_unified_motion.bin'
+$elf = Join-Path $buildDir ($artifactName + '.elf')
+$map = Join-Path $buildDir ($artifactName + '.map')
+$hex = Join-Path $buildDir ($artifactName + '.hex')
+$bin = Join-Path $buildDir ($artifactName + '.bin')
 $linker = Join-Path $projectRoot 'STM32F103ZETX_FLASH.ld'
 $linkArgs = @(
   '-mcpu=cortex-m3', '-mthumb', '-mfloat-abi=soft',
