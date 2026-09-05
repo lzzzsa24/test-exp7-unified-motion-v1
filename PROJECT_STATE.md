@@ -11,23 +11,23 @@ or physical test.
 state_schema_version: 1
 state_updated_at: 2026-09-05
 integration_branch: feature/line-reacquire-lock
-repository_head_at_update: 6f32f48
+repository_head_at_update: b35b30d
 latest_code_commit: 6f32f48
-flashed_source_commit: 4f5bae1
-flash_record_commit: fb47209
-deployed_tag: deployed/2026-09-05-forward-biased-line-search
+flashed_source_commit: 6f32f48
+flash_record_commit: b35b30d
+deployed_tag: deployed/2026-09-05-adaptive-line-search
 formal_bin_path: manual-build-unified-motion/exp7_unified_motion.bin
 formal_hex_path: manual-build-unified-motion/exp7_unified_motion.hex
-formal_bin_size_bytes: 63464
-flashed_bin_sha256: A7A4E702F7E5F6EC707B0D82A0D74A3EDB85119EF610D1197FB0F73A12F2D6C6
-flashed_hex_sha256: 1372B9C0864322D23589F8476B74B11A13020E670ADBA95D31DD96A874D7DABC
-ground_test_status: user_flashed_bounded_search_stops_adaptive_candidate_unflashed
+formal_bin_size_bytes: 63772
+flashed_bin_sha256: 4F4E186E8D841BC7B12D74087E7F7D77D017BDCD969E1BFC5378B8E0A856C972
+flashed_hex_sha256: 31B5C81AF07CF64EE05E0E997127A3D81D8B6CF1F50EFC00B3C5F69176E5819A
+ground_test_status: adaptive_search_flashed_physical_tests_pending
 k210_status: removed
 candidate_source_commit: 6f32f48
 candidate_bin_size_bytes: 63772
 candidate_bin_sha256: 4F4E186E8D841BC7B12D74087E7F7D77D017BDCD969E1BFC5378B8E0A856C972
 candidate_hex_sha256: 31B5C81AF07CF64EE05E0E997127A3D81D8B6CF1F50EFC00B3C5F69176E5819A
-user_reported_flash: previous_turn_candidate_no_new_readback
+user_reported_flash: tool_verified_current_candidate
 ```
 
 `repository_head_at_update` is the source/history anchor present when this
@@ -38,16 +38,13 @@ checker requires the anchor to remain an ancestor and prints the live HEAD.
 
 - Repository: `F:\myproject\jidian\project\test-exp7-unified-motion-v1`
 - Integration branch: `feature/line-reacquire-lock`
-- Latest firmware source commit: `6f32f48` (`Recover lost lines with sensor-guided widening sweeps`), not flashed. It retains the IR centre-key audio change.
-- The user explicitly confirms self-flashing the previous turn's new firmware
-  before observing lost-line immobility. That turn linked candidate `83ca102`;
-  there is no new programmer log or readback hash confirming the board bytes.
-  The historical `flashed_*` fields describe the last tool-verified flash,
-  not proof that the board still runs `4f5bae1`.
-- Flash/readback record: `fb47209` (`Record forward-biased search firmware flash`)
-- The formal BIN above was written over 31 pages through the bootloader at
-  57600 baud with the last calibration page preserved. Full readback reported
-  `VERIFY OK`, and GO succeeded.
+- Latest firmware source commit: `6f32f48` (`Recover lost lines with sensor-guided widening sweeps`), now flashed. It retains the IR centre-key audio change.
+- Flash/readback record: `b35b30d` (`Record adaptive line search firmware flash`).
+- The formal BIN above was rebuilt from the clean integration checkout, then
+  written through the STM32 ROM bootloader on USB-SERIAL CH340K COM11 at
+  57600 baud. Selective erase covered 32 firmware pages, preserved the final
+  calibration page, wrote and read back 63772 bytes with `VERIFY OK`, and
+  completed `GO OK: 0x08000000`.
 - Build products under `manual-build-*` are intentionally ignored by Git. A
   different computer must rebuild the named source commit rather than assume
   the artifact was transferred.
@@ -80,7 +77,7 @@ The user also rejects a fixed angular cutoff because the course has acute
 corners. This supersedes the previous assumption that their observation
 necessarily refers to the old rear-pivot image.
 
-The unflashed `6f32f48` candidate changes KEY1/KEY2 recovery as follows:
+The deployed `6f32f48` implementation changes KEY1/KEY2 recovery as follows:
 
 - Search directly commands four-wheel speed feedback at equal and opposite
   left/right targets of 3600 CPS. It no longer requests a position move, and
@@ -129,23 +126,23 @@ The unflashed `6f32f48` candidate changes KEY1/KEY2 recovery as follows:
 
 | Evidence level | Current result | Scope |
 |---|---|---|
-| computer build/link | passed | formal candidate `6f32f48`; BIN is 63772 bytes; hashes in candidate fields |
+| computer build/link | passed | formal `6f32f48`; BIN is 63772 bytes; hashes match the recorded candidate and flashed fields |
 | host regression | passed | real line controller with mocked HAL/DriveBase; fresh/unknown direction, widening reversal, opposite-sensor correction, continuation past old limits, capture/brake ownership, watchdog across retries, faults, mode reset and tick rollover; MSVC /W4 /WX |
-| flash/readback/GO | new candidate not flashed | user reports flashing the prior candidate; no fresh readback. Historical verified hash fields are unchanged |
+| flash/readback/GO | passed | COM11 at 57600 baud; 32-page selective erase; calibration page preserved; 63772-byte write and readback; `VERIFY OK`; `GO OK` |
 | wheels off ground | not performed this turn | diagnostic image compilation is not a lifted-wheel test |
-| ground driving | prior candidate sometimes stops on line loss; new candidate untested | latest user observation plus explicit need for acute corners |
+| ground driving | current firmware untested | prior candidate sometimes stopped on line loss; do not transfer that result to deployed `6f32f48` |
 
 ## Open issue and next safe step
 
-Adaptive-search implementation, formal build and host regression are complete.
-Flash only after fresh explicit authorization, using the current candidate and
-its known hashes. Ground checks should include loss with no direction hint,
-left/right acute corners, misleading initial direction, and capture after a
-reverse sweep. Verify actual backward displacement separately from encoder
-motion. The sweep durations and 8-second watchdog are initial parameters,
-not ground-calibrated results. Four digital probes cannot reliably distinguish
-an incoming segment from an outgoing segment with the same sensor pattern;
-sensor-guided search reduces blind rotation but cannot prove route identity.
+Adaptive-search implementation, formal build, host regression, flash, readback
+verification and GO are complete. Physical behavior remains unverified. Ground
+checks should include loss with no direction hint, left/right acute corners,
+misleading initial direction, and capture after a reverse sweep. Verify actual
+backward displacement separately from encoder motion. The sweep durations and
+8-second watchdog are initial parameters, not ground-calibrated results. Four
+digital probes cannot reliably distinguish an incoming segment from an outgoing
+segment with the same sensor pattern; sensor-guided search reduces blind
+rotation but cannot prove route identity.
 
 ## Update protocol
 
