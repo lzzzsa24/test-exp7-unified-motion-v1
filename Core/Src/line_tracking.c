@@ -233,6 +233,7 @@ void line_tracking_init(void)
 
 void line_tracking_reset(void)
 {
+  DriveBase_SetLineFaultObservation(0U, 0U, 0U);
   LineRecovery_Reset();
   settle_center_valid = 0U;
   settle_center_since = HAL_GetTick();
@@ -328,6 +329,10 @@ LineTrackingAction line_tracking_compute(const LineTrackingReading *reading,
     return LINE_ACTION_STOP;
   }
 
+  DriveBase_SetLineFaultObservation(1U,
+      (uint8_t)((reading->x1_black ? 1U : 0U) | (reading->x2_black ? 2U : 0U) |
+                (reading->x3_black ? 4U : 0U) | (reading->x4_black ? 8U : 0U)),
+      (uint8_t)recovery_state);
   active_count = (uint8_t)(reading->x1_black + reading->x2_black +
                            reading->x3_black + reading->x4_black);
   center_visible = (reading->x1_black || reading->x3_black) ? 1U : 0U;

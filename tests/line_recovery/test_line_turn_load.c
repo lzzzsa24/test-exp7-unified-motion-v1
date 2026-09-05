@@ -11,6 +11,12 @@
 #include "main.h"
 #include "line_tracking.h"
 #include "buzzer_phrase_40077493715.h"
+#include "line_fault_log.h"
+#include "diagnostic_uart.h"
+
+void DiagnosticUart_WriteString(const char *s) { (void)s; }
+void DiagnosticUart_WriteUnsigned(uint32_t v) { (void)v; }
+void DiagnosticUart_WriteSigned(int32_t v) { (void)v; }
 
 static uint32_t tick;
 static int32_t counts[4];
@@ -231,6 +237,82 @@ static void test_real_white_search(void)
   DriveBase_Stop(DRIVE_STOP_COAST); line_tracking_reset();
   puts("PASS: real 90-second rotation/audio -> confirmed line -> silent normal driving");
 }
+static void test_observe_faults(void)
+{
+  unsigned kind, i;
+  DriveBaseTelemetry t;
+  LineFaultRecord r={0};
+  const int32_t good[4]={50,50,-50,-50};
+  for(kind=0;kind<3;++kind)
+  {
+    int32_t delta[4]={50,50,-50,-50};
+    reset(); DriveBase_SetLineFaultObservation(1,5,1);
+    command(2500,-2500,1);
+    for(i=0;i<10;++i) sample(good);
+    if(kind==0) delta[0]=0;
+    if(kind==1) delta[0]=-1;
+    for(i=0;i<150;++i)
+    {
+      if(kind==2) diagnostics.illegal_transition_count[0]+=6;
+      command(2500,-2500,1); sample(delta);
+      assert(!DriveBase_GetFaultMask() && pins[0]>0 && pins[2]<0);
+    }
+    DriveBase_GetTelemetry(&t);
+    assert(t.mode==DRIVE_BASE_SPEED && DriveBase_GetLineDegradedMask()==1);
+    assert(LineFaultLog_Count()==1 && LineFaultLog_Get(0,&r));
+    assert(r.stall_mask==(kind==0?1:0) && r.direction_mask==(kind==1?1:0));
+    assert(r.signal_mask==(kind==2?1:0) && r.battery_mv==7800 && r.occurrences>1);
+    assert(r.requested[0]==2500 && r.delta[0]==delta[0] && r.sensor_mask==5);
+    assert(r.recovery_state==1 && r.degraded_mask==1);
+    /* Bad feedback does not repeatedly add PI/startup/load effort. */
+    assert(t.output_pwm[0]<3000 && t.output_pwm[0]>0);
+    DriveBase_Stop(DRIVE_STOP_COAST); DriveBase_SetLineFaultObservation(0,0,0);
+    DriveBase_ClearFault();
+    assert(!pins[0] && !pins[1] && !pins[2] && !pins[3]);
+    assert(LineFaultLog_Count()==1 && !DriveBase_GetLineDegradedMask());
+    /* Ordinary speed owner again retains its original stop policy. */
+    command(2500,-2500,0);
+    delta[0]=0;
+    for(i=0;i<100;++i) sample(delta);
+    assert(DriveBase_GetFaultMask() & 1);
+  }
+  /* A position command must not inherit diagnostic-only faults. */
+  {
+    DrivePositionCommand move={{1000,1000,1000,1000},{2500,2500,2500,2500},100,12,DRIVE_STOP_COAST};
+    const int32_t zero[4]={0};
+    reset(); DriveBase_SetLineFaultObservation(1,0,1);
+    assert(DriveBase_StartPositionMove(&move));
+    for(i=0;i<10;++i) sample(zero);
+    assert(DriveBase_GetFaultMask() & DRIVE_FAULT_TIMEOUT);
+  }
+  /* Actual line recovery keeps spinning, sounding and reacquiring with no
+     M1 counts; same reset hook cancels movement and keeps the evidence. */
+  {
+    LineTrackingReading reading={0}; LineTrackingCommand out;
+    line_tracking_reset(); reset(); line_tracking_set_no_line_forward(0);
+    for(i=0;i<300;++i)
+    {
+      int32_t delta[4]={0,pins[1]>0?50:(pins[1]<0?-50:0),
+          pins[2]>0?50:(pins[2]<0?-50:0),pins[3]>0?50:(pins[3]<0?-50:0)};
+      sample(delta); line_tracking_compute(&reading,3000,&out);
+      if(out.valid) DriveBase_SetSideCps(out.left_cps,out.right_cps);
+    }
+    assert(LineFaultLog_Count() && !DriveBase_GetFaultMask() && pins[0]<0 && pins[2]>0);
+    assert(BuzzerPhrase400_IsPlaying());
+    reading.x1_black=reading.x3_black=1;
+    for(i=0;i<60;++i)
+    {
+      int32_t delta[4]={0,pins[1]>0?50:(pins[1]<0?-50:0),
+          pins[2]>0?50:(pins[2]<0?-50:0),pins[3]>0?50:(pins[3]<0?-50:0)};
+      sample(delta); line_tracking_compute(&reading,3000,&out);
+      if(out.valid) DriveBase_SetSideCps(out.left_cps,out.right_cps);
+    }
+    assert(!DriveBase_GetFaultMask() && !BuzzerPhrase400_IsPlaying() && pins[0]>0 && pins[2]>0);
+    line_tracking_reset(); DriveBase_Stop(DRIVE_STOP_COAST);
+    assert(!pins[0] && LineFaultLog_Count());
+  }
+  puts("PASS: line faults log and continue; bounded fallback; capture/STOP; other owners still stop");
+}
 int main(void)
 {
   LineTurnLoadState s={0};
@@ -328,6 +410,7 @@ int main(void)
   test_position_coast_handoff(-1);
   test_real_search_capture();
   test_real_white_search();
+  test_observe_faults();
   (void)trace(2500,-2500,0,1);
   for(i=0;i<4;++i) sample(creep);
   assert(pins[0]<3000);
