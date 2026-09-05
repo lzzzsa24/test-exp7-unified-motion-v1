@@ -98,6 +98,13 @@ void DriveBase_SetSideCps(int32_t left_cps, int32_t right_cps);
    expires after 60 ms without a newly armed, accepted command. No motion here. */
 void DriveBase_PrepareLineTurnAssist(int32_t left_cps, int32_t right_cps);
 
+/* Explicit line ownership. Encoder-derived speed faults are logged without
+   stopping; affected wheels use bounded feedforward until line mode reset.
+   Position control never inherits this policy. Does not clear hard faults. */
+void DriveBase_SetLineFaultObservation(uint8_t enabled, uint8_t sensors,
+                                      uint8_t recovery_state);
+uint8_t DriveBase_GetLineDegradedMask(void);
+
 /* Compatibility conversion for existing high-level modules whose tuned
    parameters are still expressed in logical PWM units. */
 int32_t DriveBase_EquivalentCpsFromPwm(int16_t signed_pwm);

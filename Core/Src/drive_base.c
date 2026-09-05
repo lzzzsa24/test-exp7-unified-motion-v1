@@ -5,6 +5,7 @@
 #include "motorPWM.h"
 #include "wheel_encoder.h"
 #include "line_turn_load.h"
+#include "line_fault_log.h"
 
 #define DRIVE_CONTROL_PERIOD_MS                 20U
 #define DRIVE_TARGET_RAMP_CPS_PER_PERIOD       700L
@@ -69,6 +70,8 @@ static uint8_t fault_mask;
 static uint8_t direction_fault_mask;
 static uint8_t encoder_signal_fault_mask;
 static uint8_t sync_fault;
+static uint8_t line_fault_observe, line_degraded_mask, line_sensor_mask, line_recovery_state;
+static uint32_t fault_illegal_delta[DRIVE_BASE_WHEEL_COUNT];
 static uint8_t position_completion_pending;
 static uint8_t sync_fault_pending;
 static uint32_t last_control_ms;
@@ -414,6 +417,19 @@ static int16_t speed_control_output(uint8_t motor,
     return 0;
   }
 
+  if (line_fault_observe && (line_degraded_mask & (uint8_t)(1U << motor)))
+  {
+    /* Feedback is suspect: do not integrate it or repeatedly boost a wheel.
+       Keep the requested direction and its existing calibrated PWM floor. */
+    integral_error[motor] = 0L;
+    recovery_boost_remaining_ms[motor] = 0U;
+    line_load[motor] = (LineTurnLoadState){0};
+    feedforward = pwm_for_cps_magnitude(target_cps);
+    feedforward = (feedforward * voltage_compensation_permille + 500L) / 1000L;
+    feedforward = clamp_i32(feedforward, minimum_continuous_pwm[direction_index][motor], MOTOR_PWM_PERIOD);
+    return (int16_t)((int32_t)direction * feedforward);
+  }
+
   if (recovery_boost_remaining_ms[motor] > 0U)
   {
     recovery_boost_remaining_ms[motor] =
@@ -601,6 +617,7 @@ static void update_encoder_fault_inputs(const WheelEncoderCounts *current,
 
     previous_illegal_count[motor] =
         diagnostics.illegal_transition_count[motor];
+    fault_illegal_delta[motor] = illegal_delta;
     if (illegal_delta >= DRIVE_ILLEGAL_FAULT_PER_SAMPLE)
     {
       if (illegal_transition_streak[motor] < 255U)
@@ -643,7 +660,9 @@ static void update_encoder_fault_inputs(const WheelEncoderCounts *current,
     }
     else if (delta[motor] == 0L)
     {
-      no_motion_ms[motor] += elapsed_ms;
+      if (no_motion_ms[motor] < DRIVE_STALL_TIMEOUT_MS)
+        no_motion_ms[motor] += elapsed_ms < DRIVE_STALL_TIMEOUT_MS - no_motion_ms[motor]
+                            ? elapsed_ms : DRIVE_STALL_TIMEOUT_MS - no_motion_ms[motor];
       if (abs_i32(target) >= DRIVE_CONTINUOUS_MIN_CPS &&
           no_motion_ms[motor] >= DRIVE_RECOVERY_BASE_DELAY_MS +
                                   (uint32_t)motor *
@@ -1026,8 +1045,39 @@ static void control_speed_mode(const int32_t delta[4],
   update_encoder_fault_inputs(&previous_counts, delta, elapsed_ms, now);
   if (fault_mask != 0U)
   {
-    enter_fault(fault_mask, now);
-    return;
+    if (line_fault_observe)
+    {
+      LineFaultRecord record = {0};
+      record.first_ms = now;
+      record.elapsed_ms = elapsed_ms;
+      record.direction_mask = direction_fault_mask;
+      record.signal_mask = encoder_signal_fault_mask;
+      for (motor = 0U; motor < DRIVE_BASE_WHEEL_COUNT; ++motor)
+      {
+        if (no_motion_ms[motor] >= DRIVE_STALL_TIMEOUT_MS)
+          record.stall_mask |= (uint8_t)(1U << motor);
+        record.requested[motor] = requested_cps[motor];
+        record.controlled[motor] = controlled_cps[motor];
+        record.measured[motor] = measured_cps[motor];
+        record.pwm[motor] = output_pwm[motor];
+        record.delta[motor] = delta[motor];
+        record.illegal_delta[motor] = fault_illegal_delta[motor];
+        record.no_motion_ms[motor] = no_motion_ms[motor];
+      }
+      line_degraded_mask |= (uint8_t)(fault_mask & 0x0FU);
+      record.degraded_mask = line_degraded_mask;
+      record.sensor_mask = line_sensor_mask;
+      record.recovery_state = line_recovery_state;
+      record.battery_mv = battery_mv;
+      LineFaultLog_Record(&record);
+      /* These are observed warnings, not a blocking DriveBase fault. */
+      fault_mask = direction_fault_mask = encoder_signal_fault_mask = 0U;
+    }
+    else
+    {
+      enter_fault(fault_mask, now);
+      return;
+    }
   }
   for (motor = 0U; motor < DRIVE_BASE_WHEEL_COUNT; ++motor)
   {
@@ -1169,6 +1219,8 @@ void DriveBase_Init(void)
   uint8_t motor;
 
   drive_mode = DRIVE_BASE_STOPPED;
+  line_fault_observe = line_degraded_mask = 0U;
+  LineFaultLog_Init();
   position_state = DRIVE_POSITION_IDLE;
   brake_phase = DRIVE_BRAKE_NONE;
   reset_line_assist();
@@ -1218,6 +1270,16 @@ void DriveBase_PrepareLineTurnAssist(int32_t left_cps, int32_t right_cps)
   line_assist_right = right_cps;
   line_assist_prepared_ms = HAL_GetTick();
 }
+
+void DriveBase_SetLineFaultObservation(uint8_t enabled, uint8_t sensors,
+                                      uint8_t recovery)
+{
+  line_fault_observe = enabled != 0U;
+  line_sensor_mask = sensors;
+  line_recovery_state = recovery;
+  if (!line_fault_observe) line_degraded_mask = 0U;
+}
+uint8_t DriveBase_GetLineDegradedMask(void) { return line_degraded_mask; }
 
 void DriveBase_SetWheelCps(int32_t motor1_cps,
                            int32_t motor2_cps,
@@ -1304,6 +1366,7 @@ uint8_t DriveBase_StartPositionMove(const DrivePositionCommand *command)
   }
   if (active == 0U) return 0U;
 
+  DriveBase_SetLineFaultObservation(0U, 0U, 0U);
   coast_all();
   clear_motion_targets();
   WheelEncoder_GetCounts(&current);

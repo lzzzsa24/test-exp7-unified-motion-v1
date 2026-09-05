@@ -21,6 +21,8 @@ void HAL_GPIO_WritePin(GPIO_TypeDef *p,uint16_t n,GPIO_PinState s)
 { assert(p==Buzzer_GPIO_Port && n==Buzzer_Pin); if(s && !buzzer) ++attacks; buzzer=s; }
 int32_t DriveBase_EquivalentCpsFromPwm(int16_t p) { return p; }
 void DriveBase_PrepareLineTurnAssist(int32_t l,int32_t r) { (void)l; (void)r; }
+void DriveBase_SetLineFaultObservation(uint8_t e,uint8_t s,uint8_t r)
+{ (void)e; (void)s; (void)r; }
 void DriveBase_GetTelemetry(DriveBaseTelemetry *t) { *t=telemetry; }
 uint8_t DriveBase_GetFaultMask(void) { return telemetry.fault_mask; }
 void DriveBase_Task(uint32_t now)

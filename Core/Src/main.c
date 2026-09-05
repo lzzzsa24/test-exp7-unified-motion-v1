@@ -17,6 +17,7 @@
  */
 
 #include "main.h"
+#include "line_fault_log.h"
 #include "gpio.h"
 
 #include <stdint.h>
@@ -406,6 +407,10 @@ static uint8_t app_take_serial_virtual_key(void)
 
   switch (value)
   {
+    case 'f':
+    case 'F':
+      LineFaultLog_RequestDump();
+      return IR_REMOTE_VIRTUAL_KEY_NONE;
     case '0':
       BuzzerPhrase400_Stop();
       return IR_REMOTE_VIRTUAL_STOP;
@@ -723,6 +728,10 @@ static void drive_base_telemetry_task(void)
   DiagnosticUart_WriteUnsigned(telemetry.voltage_compensation_permille);
   DiagnosticUart_WriteString(" SP=");
   DiagnosticUart_WriteSigned(telemetry.maximum_progress_spread_permille);
+  DiagnosticUart_WriteString(" DEG=");
+  DiagnosticUart_WriteUnsigned(DriveBase_GetLineDegradedMask());
+  DiagnosticUart_WriteString(" LOG=");
+  DiagnosticUart_WriteUnsigned(LineFaultLog_Count());
   for (motor = 0U; motor < DRIVE_BASE_WHEEL_COUNT; ++motor)
   {
     DiagnosticUart_WriteString(" W");
@@ -1008,6 +1017,7 @@ int main(void)
   MX_GPIO_Init();
   BuzzerPhrase400_Init();
   DiagnosticUart_Init();
+  DiagnosticUart_WriteString("\r\nLINE FAULT LOG v1: f=DUMP WHEN STOPPED; RAM ONLY; KEEP POWER ON; DEG=FEEDFORWARD WHEEL MASK\r\n");
   DiagnosticUart_WriteString("\r\nEXP7 UNIFIED MOTION V1 READY: DEFAULT STOP; 4ENC SIGNED CLOSED LOOP; UART 0=STOP 1/2/3=MODE 4=SQUARE b=x1 B=x6 x=BUZZER_STOP; IR CENTER=BUZZER x1\r\n");
   motor_pwm_init();
   WheelEncoder_Init();
@@ -1195,6 +1205,7 @@ int main(void)
 
     DriveBase_Task(HAL_GetTick());
     drive_base_telemetry_task();
+    LineFaultLog_Task((uint8_t)(app_mode == APP_MODE_STOPPED));
 
     if (DriveBase_GetFaultMask() != 0U &&
         (app_mode == APP_MODE_INTEGRATED ||
