@@ -13,6 +13,7 @@ extern "C" {
 #define IR_REMOTE_VIRTUAL_KEY3      3U
 #define IR_REMOTE_VIRTUAL_STOP      4U
 #define IR_REMOTE_VIRTUAL_KEY4      5U
+#define IR_REMOTE_VIRTUAL_AUDIO_ONCE 6U
 
 /* 初始化板载 HS0038B：PG11 下降沿 EXTI，DWT 周期计数器负责微秒计时。 */
 void IrRemote_Init(void);

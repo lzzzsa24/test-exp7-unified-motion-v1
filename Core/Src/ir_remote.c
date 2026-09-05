@@ -8,6 +8,9 @@
 #define IR_COMMAND_NUMBER_3          0x12U
 #define IR_COMMAND_NUMBER_4          0x14U
 #define IR_COMMAND_NUMBER_0          0x0DU
+/* Yahboom remote direction-pad centre / buzzer button.  Its 0x05 command
+   belongs to the same map as number 1=0x10 and number 2=0x11 above. */
+#define IR_COMMAND_CENTER_BUZZER     0x05U
 
 #define IR_LEADER_MIN_US            12500U
 #define IR_LEADER_MAX_US            14500U
@@ -90,6 +93,8 @@ uint8_t IrRemote_TakeVirtualKey(void)
       return IR_REMOTE_VIRTUAL_KEY4;
     case IR_COMMAND_NUMBER_0:
       return IR_REMOTE_VIRTUAL_STOP;
+    case IR_COMMAND_CENTER_BUZZER:
+      return IR_REMOTE_VIRTUAL_AUDIO_ONCE;
     default:
       return IR_REMOTE_VIRTUAL_KEY_NONE;
   }

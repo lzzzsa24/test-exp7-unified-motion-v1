@@ -775,6 +775,18 @@ static AppMode read_requested_mode(AppMode current_mode)
     return APP_MODE_STOPPED;
   }
 
+  /* The centre button in the remote's direction pad is the Yahboom 0x05
+     buzzer key.  Treat it as a one-shot side action: it neither starts nor
+     changes a drive mode, and NEC repeat frames are already suppressed by
+     ir_remote.c.  Existing safety arbitration may still cancel the phrase. */
+  if (remote_key == IR_REMOTE_VIRTUAL_AUDIO_ONCE)
+  {
+    if (BuzzerPhrase400_Start(1U) != 0U)
+    {
+      DiagnosticUart_WriteString("IR CENTER: BUZZER PHRASE x1\r\n");
+    }
+  }
+
   if (HAL_GPIO_ReadPin(key1_GPIO_Port, key1_Pin) == GPIO_PIN_RESET ||
       remote_key == IR_REMOTE_VIRTUAL_KEY1)
   {
@@ -996,7 +1008,7 @@ int main(void)
   MX_GPIO_Init();
   BuzzerPhrase400_Init();
   DiagnosticUart_Init();
-  DiagnosticUart_WriteString("\r\nEXP7 UNIFIED MOTION V1 READY: DEFAULT STOP; 4ENC SIGNED CLOSED LOOP; UART 0=STOP 1/2/3=MODE 4=SQUARE b=x1 B=x6 x=BUZZER_STOP\r\n");
+  DiagnosticUart_WriteString("\r\nEXP7 UNIFIED MOTION V1 READY: DEFAULT STOP; 4ENC SIGNED CLOSED LOOP; UART 0=STOP 1/2/3=MODE 4=SQUARE b=x1 B=x6 x=BUZZER_STOP; IR CENTER=BUZZER x1\r\n");
   motor_pwm_init();
   WheelEncoder_Init();
   WheelSpeedObserver_Init();
