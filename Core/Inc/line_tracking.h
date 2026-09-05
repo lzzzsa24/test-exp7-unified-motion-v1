@@ -40,23 +40,19 @@ typedef struct
   int32_t left_cps;
   int32_t right_cps;
   LineTrackingAction action;
-  /* valid=0 while recovery directly owns DriveBase speed/brake commands. */
+  /* This test profile returns side commands for both tracking and recovery. */
   uint8_t valid;
 } LineTrackingCommand;
 
 void line_tracking_init(void);
 void line_tracking_reset(void);
 /* enable=1：尚未见过黑线时允许无黑线直行；enable=0 或已经见过黑线：
-   全白时按近期稳定位置执行四轮差速搜索；无方向时短时左右试探。
-   外侧探头可引导换向，一侧未找到则扩大反向搜索，不设固定角度截止。
-   中间 X1/X3 稳定确认后制动并低速捕线；整个恢复过程超过 8 秒或驱动
-   故障才锁定停车，需停止后重新选择模式。 */
+   全白时只沿预测方向原地搜索，最多1500 ms；不后退、不反向搜索。
+   无方向时停车。任一路见线后停车70 ms，再低速恢复250 ms。 */
 void line_tracking_set_no_line_forward(uint8_t enable);
-/* enable=1: use filtered PD differential steering as the line-position outer
-   loop. Wheel-speed feedback remains in DriveBase. */
+/* Compatibility no-op: this test restores the pre-PD discrete controller. */
 void line_tracking_set_smooth_mode(uint8_t enable);
-/* 100 keeps the normal KEY2 steering gain; 200 doubles KEY1's requested
-   steering component before the safe PWM saturation. */
+/* Compatibility no-op: use the historical fixed steering parameters. */
 void line_tracking_set_turn_gain_percent(uint16_t percent);
 LineTrackingReading line_tracking_read(void);
 LineTrackingAction line_tracking_compute(const LineTrackingReading *reading,

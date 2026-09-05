@@ -49,7 +49,7 @@
 #include "wheel_speed_control.h"
 
 /* 综合模式参数。PWM 周期为 3599。 */
-#define EXP7_LINE_SPEED                 3000
+#define EXP7_LINE_SPEED                 2600
 #define EXP7_LIMIT_SPEED               2200
 
 /* 超声波安全层参数。距离阈值由 ultrasonic_avoid.c 实现，速度在这里
@@ -1126,8 +1126,8 @@ int main(void)
       if (app_mode == APP_MODE_INTEGRATED)
       {
         line_tracking_set_no_line_forward(1U);
-        /* KEY1 and KEY2 share the filtered centre controller.  Sharp outer
-           sensor turns and lost-line recovery remain immediate. */
+        /* Historical test profile: these compatibility setters are no-ops;
+           KEY1 and KEY2 both use the restored discrete line controller. */
         line_tracking_set_smooth_mode(1U);
         line_tracking_set_turn_gain_percent(200U);
         /* 切回综合模式后从 WAIT_SAFE 重新确认距离，不沿用上一次动作。 */
