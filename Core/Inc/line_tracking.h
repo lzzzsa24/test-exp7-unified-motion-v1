@@ -10,17 +10,6 @@
 
 #include <stdint.h>
 
-/* Search-only axle-speed experiment. 100 reproduces the equal-axle baseline;
-   60 reduces rear wheel travel demand while keeping all four wheels driven.
-   This is not a chassis-pivot position command. Keep rear targets >=1800 CPS
-   at the 3600 CPS front target; zero would coast, not hold the rear axle. */
-#ifndef LINE_TRACKING_SEARCH_REAR_PERCENT
-#define LINE_TRACKING_SEARCH_REAR_PERCENT 60U
-#endif
-#if LINE_TRACKING_SEARCH_REAR_PERCENT < 50 || LINE_TRACKING_SEARCH_REAR_PERCENT > 100
-#error "Search rear percent must be between 50 and 100"
-#endif
-
 #ifdef __cplusplus
 extern "C" {
 #endif

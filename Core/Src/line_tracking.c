@@ -7,6 +7,7 @@
  */
 
 #include "line_tracking.h"
+#include "line_search_model.h"
 
 #include "drive_base.h"
 #include "main.h"
@@ -58,10 +59,10 @@ static LineRecoveryState recovery_state;
 static uint32_t recovery_state_started_ms;
 
 #define TRACKING_DIRECTION_GUARD_MS          70U
-#define TRACKING_SEARCH_FIRST_LEG_MS          900U
-#define TRACKING_SEARCH_PROBE_LEG_MS          250U
-#define TRACKING_SEARCH_MAX_LEG_MS           2400U
-#define TRACKING_SEARCH_TURN_CPS             3600L
+#define TRACKING_SEARCH_FIRST_LEG_MS LINE_SEARCH_LEG_MS(900U)
+#define TRACKING_SEARCH_PROBE_LEG_MS LINE_SEARCH_LEG_MS(250U)
+#define TRACKING_SEARCH_MAX_LEG_MS   LINE_SEARCH_LEG_MS(2400U)
+#define TRACKING_SEARCH_TURN_CPS LINE_SEARCH_TARGET_CPS
 #define TRACKING_SEARCH_TIMEOUT_MS           8000U
 #define TRACKING_HINT_CONFIRM_MS               20U
 #define TRACKING_HINT_MAX_AGE_MS              200U
@@ -173,12 +174,10 @@ static void command_search_wheels(void)
 {
   int32_t front = recovery_turn_direction < 0
                 ? -TRACKING_SEARCH_TURN_CPS : TRACKING_SEARCH_TURN_CPS;
-  int32_t rear = (front * (int32_t)LINE_TRACKING_SEARCH_REAR_PERCENT) / 100L;
-
-  /* M1/M2 left front/rear; M3/M4 right front/rear. Retain zero mean
-     longitudinal target on each axle and mirror both left/right searches.
-     Actual fore/aft ICR still depends on tyre slip and normal loads. */
-  DriveBase_SetWheelCps(front, rear, -front, -rear);
+  /* Rigid-body longitudinal projection u_i = vx - yaw_rate*y_i: front and
+     rear on the same side have equal demand. Unequal axle targets require
+     extra longitudinal slip; they do not prescribe a rearward ICR. */
+  DriveBase_SetWheelCps(front, front, -front, -front);
 }
 
 /* Observe sensor position, never the filtered motor correction. A newly
