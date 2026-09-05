@@ -24,13 +24,6 @@
       LINE_SEARCH_EFFECTIVE_TRACK_MM * LINE_SEARCH_COUNTS_PER_REV + \
       LINE_SEARCH_CPS_DENOMINATOR / 2LL) / LINE_SEARCH_CPS_DENOMINATOR))
 
-/* Preserve the earlier 3600-CPS sweep's nominal travel when reducing speed.
-   These are leg-switch timers, not total angle cutoffs. Sensor feedback can
-   extend a leg; the independent whole-episode 8-second watchdog is unchanged. */
-#define LINE_SEARCH_LEG_MS(baseline_ms) \
-  ((uint32_t)(((int64_t)(baseline_ms) * 3600L + LINE_SEARCH_TARGET_CPS - 1L) / \
-               LINE_SEARCH_TARGET_CPS))
-
 /* Existing continuous-speed operating band: do not silently clamp a nominal
    yaw request and thereby hide that the requested conversion is infeasible. */
 _Static_assert(LINE_SEARCH_TARGET_CPS >= 1412L &&

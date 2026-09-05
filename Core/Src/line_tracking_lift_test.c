@@ -23,7 +23,7 @@ enum
   LIFT_TEST_FAIL_SEARCH_NOT_STARTED = 0x02U,
   LIFT_TEST_FAIL_OUTER_RELEASED = 0x04U,
   LIFT_TEST_FAIL_OUTER_NOT_SEARCHING = 0x08U,
-  LIFT_TEST_FAIL_ENCODER_DIRECTION = 0x10U,
+  LIFT_TEST_FAIL_NO_WHEEL_MOTION = 0x10U,
   LIFT_TEST_FAIL_CENTER_NOT_CAPTURED = 0x20U,
   LIFT_TEST_FAIL_DRIVE_BASE = 0x40U,
   LIFT_TEST_FAIL_CAPTURE_PAUSE = 0x80U
@@ -49,6 +49,8 @@ static LineTrackingReading reading_from_mask(uint8_t mask)
   reading.x4_black = (mask & 0x08U) != 0U ? 1U : 0U;
   return reading;
 }
+
+static int32_t abs_i32(int32_t value) { return value < 0L ? -value : value; }
 
 static void apply_command(const LineTrackingCommand *command)
 {
@@ -159,14 +161,15 @@ void LineTrackingLiftTest_Run(void)
     fail_mask |= LIFT_TEST_FAIL_INITIAL_FORWARD;
   }
 
-  /* All white starts a four-wheel speed-controlled left search. */
+  /* All white brakes and retraces recent forward counts before local probes.
+     Observe motion across both lost/outer phases, not a presumed spin phase. */
+  WheelEncoder_GetCounts(&outer_start);
   run_phase(0x00U, LIFT_TEST_LOST_SEARCH_MS, 0U, &lost);
   if (lost.search_samples == 0U)
   {
     fail_mask |= LIFT_TEST_FAIL_SEARCH_NOT_STARTED;
   }
 
-  WheelEncoder_GetCounts(&outer_start);
   /* X2 is left outer only. It must retain recovery ownership, not go forward. */
   run_phase(0x02U, LIFT_TEST_OUTER_ONLY_MS, 1U, &outer);
   WheelEncoder_GetCounts(&outer_end);
@@ -178,16 +181,16 @@ void LineTrackingLiftTest_Run(void)
   {
     fail_mask |= LIFT_TEST_FAIL_OUTER_NOT_SEARCHING;
   }
-  if (outer_end.motor1 >= outer_start.motor1 - 20L ||
-      outer_end.motor3 <= outer_start.motor3 + 20L ||
-      outer_end.motor2 >= outer_start.motor2 - 20L ||
-      outer_end.motor4 <= outer_start.motor4 + 20L)
+  if (abs_i32(outer_end.motor1 - outer_start.motor1) +
+      abs_i32(outer_end.motor2 - outer_start.motor2) +
+      abs_i32(outer_end.motor3 - outer_start.motor3) +
+      abs_i32(outer_end.motor4 - outer_start.motor4) < 40L)
   {
-    fail_mask |= LIFT_TEST_FAIL_ENCODER_DIRECTION;
+    fail_mask |= LIFT_TEST_FAIL_NO_WHEEL_MOTION;
   }
 
-  /* X1 is a middle hit. After 12 ms confirmation and active braking, the
-     controller may hand back to low-speed line capture. */
+  /* A middle hit stops motion immediately, then confirms for 20 ms while
+     stationary before handing back to low-speed forward capture. */
   run_phase(0x01U, LIFT_TEST_CENTER_CAPTURE_MS, 0U, &capture);
   run_phase(0x05U, LIFT_TEST_FINAL_CENTER_MS, 0U, &final_center);
   if (capture.valid_samples == 0U || final_center.forward_samples == 0U)

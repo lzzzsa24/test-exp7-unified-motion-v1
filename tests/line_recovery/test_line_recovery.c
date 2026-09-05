@@ -1,5 +1,5 @@
-/* Real line controller with mocked HAL/DriveBase. These tests validate
-   sensor histories and motor ownership, not wheel traction or physical yaw. */
+/* Real line/recovery sources, a deterministic wheel-count plant and mocked
+   DriveBase. Count retracing is verified; physical slip cancellation is not. */
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
@@ -7,239 +7,289 @@
 #include "line_tracking.h"
 #include "line_search_model.h"
 #include "drive_base.h"
+#include "wheel_encoder.h"
 
-static uint32_t tick;
+static uint32_t tick, brake_started;
 static DriveBaseTelemetry telemetry;
 static LineTrackingCommand output;
-static unsigned speed_commands, brake_commands;
-static uint32_t brake_started;
-static uint8_t fault_on_task;
-
+static int32_t counts[4], goal[4];
+static DrivePositionCommand moves[16];
+static int32_t move_origins[16][4], probe_origins[8][4];
+static unsigned move_count, probe_count;
+static uint8_t reject_move;
+static int32_t max_probe_travel;
+static int32_t abs32(int32_t n) { return n < 0 ? -n : n; }
 uint32_t HAL_GetTick(void) { return tick; }
-int HAL_GPIO_ReadPin(GPIO_TypeDef *p, uint16_t n)
-{ (void)p; (void)n; return 1; }
-void HAL_GPIO_Init(GPIO_TypeDef *p, GPIO_InitTypeDef *g)
-{ (void)p; (void)g; }
+int HAL_GPIO_ReadPin(GPIO_TypeDef *p, uint16_t n) { (void)p; (void)n; return 1; }
+void HAL_GPIO_Init(GPIO_TypeDef *p, GPIO_InitTypeDef *g) { (void)p; (void)g; }
 int32_t DriveBase_EquivalentCpsFromPwm(int16_t p) { return p; }
-void DriveBase_GetTelemetry(DriveBaseTelemetry *t) { *t = telemetry; }
+void WheelEncoder_GetCounts(WheelEncoderCounts *c)
+{ c->motor1=counts[0]; c->motor2=counts[1]; c->motor3=counts[2]; c->motor4=counts[3]; }
+void DriveBase_GetTelemetry(DriveBaseTelemetry *t) { *t=telemetry; }
+uint8_t DriveBase_GetFaultMask(void) { return telemetry.fault_mask; }
+DrivePositionState DriveBase_GetPositionState(void) { return telemetry.position_state; }
 void DriveBase_Task(uint32_t now)
 {
-  if (fault_on_task)
+  if (telemetry.mode==DRIVE_BASE_BRAKING && now-brake_started>=52U)
   {
-    telemetry.fault_mask = DRIVE_FAULT_MOTOR1;
-    telemetry.mode = DRIVE_BASE_FAULT;
+    telemetry.mode=DRIVE_BASE_STOPPED;
+    if (telemetry.position_state==DRIVE_POSITION_SETTLING)
+      telemetry.position_state=DRIVE_POSITION_DONE;
   }
-  else if (telemetry.mode == DRIVE_BASE_BRAKING && now - brake_started >= 52U)
-    telemetry.mode = DRIVE_BASE_STOPPED;
 }
-uint8_t DriveBase_GetFaultMask(void) { return telemetry.fault_mask; }
 void DriveBase_Stop(DriveStopMode mode)
 {
-  if (mode == DRIVE_STOP_BRAKE)
+  if (mode==DRIVE_STOP_BRAKE)
+  { telemetry.mode=DRIVE_BASE_BRAKING; brake_started=tick; }
+  else
+  { telemetry.mode=DRIVE_BASE_STOPPED; telemetry.position_state=DRIVE_POSITION_IDLE; }
+  memset(telemetry.requested_cps,0,sizeof telemetry.requested_cps);
+}
+void DriveBase_SetWheelCps(int32_t m1,int32_t m2,int32_t m3,int32_t m4)
+{
+  assert(telemetry.mode!=DRIVE_BASE_BRAKING && !telemetry.fault_mask);
+  assert(telemetry.position_state!=DRIVE_POSITION_RUNNING);
+  if (m1==-m3 && m2==-m4 && m1!=0 && telemetry.mode!=DRIVE_BASE_SPEED)
   {
-    ++brake_commands;
-    brake_started = tick;
-    telemetry.mode = DRIVE_BASE_BRAKING;
+    assert(probe_count<8);
+    memcpy(probe_origins[probe_count++],counts,sizeof counts);
   }
-  else telemetry.mode = DRIVE_BASE_STOPPED;
-  memset(telemetry.requested_cps, 0, sizeof telemetry.requested_cps);
+  telemetry.mode=DRIVE_BASE_SPEED;
+  telemetry.requested_cps[0]=m1; telemetry.requested_cps[1]=m2;
+  telemetry.requested_cps[2]=m3; telemetry.requested_cps[3]=m4;
 }
-void DriveBase_SetWheelCps(int32_t m1, int32_t m2, int32_t m3, int32_t m4)
+void DriveBase_SetSideCps(int32_t l,int32_t r) { DriveBase_SetWheelCps(l,l,r,r); }
+uint8_t DriveBase_StartPositionMove(const DrivePositionCommand *m)
 {
-  /* A new speed command during active braking would violate ownership even
-     though the production DriveBase rejects it. Make that visible here. */
-  assert(telemetry.mode != DRIVE_BASE_BRAKING && telemetry.fault_mask == 0);
-  ++speed_commands;
-  telemetry.mode = DRIVE_BASE_SPEED;
-  telemetry.requested_cps[0] = m1;
-  telemetry.requested_cps[1] = m2;
-  telemetry.requested_cps[2] = m3;
-  telemetry.requested_cps[3] = m4;
-}
-void DriveBase_SetSideCps(int32_t left, int32_t right)
-{
-  DriveBase_SetWheelCps(left, left, right, right);
-}
-static LineTrackingAction sample(unsigned mask, uint32_t dt)
-{
-  LineTrackingReading r = {mask & 1, (mask >> 1) & 1,
-                          (mask >> 2) & 1, (mask >> 3) & 1};
-  LineTrackingAction action;
-  tick += dt;
-  action = line_tracking_compute(&r, 3000, &output);
-  /* Production caller applies valid commands after each compute. */
-  if (output.valid)
+  unsigned i;
+  assert(telemetry.mode!=DRIVE_BASE_BRAKING && !telemetry.fault_mask);
+  if (reject_move) return 0;
+  assert(move_count<16);
+  moves[move_count]=*m;
+  memcpy(move_origins[move_count],counts,sizeof counts);
+  ++move_count;
+  telemetry.mode=DRIVE_BASE_POSITION;
+  telemetry.position_state=DRIVE_POSITION_RUNNING;
+  for(i=0;i<4;++i)
   {
-    if (output.left_cps == 0 && output.right_cps == 0)
-      DriveBase_Stop(DRIVE_STOP_COAST);
-    else DriveBase_SetSideCps(output.left_cps, output.right_cps);
+    goal[i]=counts[i]+m->delta_counts[i];
+    telemetry.position_target_counts[i]=m->delta_counts[i];
+    telemetry.position_moved_counts[i]=0;
+    telemetry.requested_cps[i]=m->delta_counts[i]<0?-m->maximum_cps[i]:m->maximum_cps[i];
   }
-  return action;
+  return 1;
 }
-static void reset(uint8_t forward, uint8_t smooth)
+uint8_t DriveBase_RequestPositionStop(DriveStopMode mode)
+{
+  assert(telemetry.position_state==DRIVE_POSITION_RUNNING);
+  DriveBase_Stop(mode);
+  telemetry.position_state=DRIVE_POSITION_SETTLING;
+  return 1;
+}
+static void plant(uint32_t dt)
+{
+  unsigned i;
+  uint8_t done=1;
+  for(i=0;i<4;++i)
+  {
+    int32_t step=telemetry.requested_cps[i]*(int32_t)dt/1000L;
+    if(telemetry.mode==DRIVE_BASE_SPEED) counts[i]+=step;
+    if(telemetry.mode==DRIVE_BASE_POSITION)
+    {
+      int32_t remaining=goal[i]-counts[i];
+      int32_t magnitude=abs32(step);
+      if(magnitude>abs32(remaining)) magnitude=abs32(remaining);
+      counts[i]+=remaining<0?-magnitude:magnitude;
+      telemetry.position_moved_counts[i]=counts[i]-move_origins[move_count-1][i];
+      if(abs32(goal[i]-counts[i])>12) done=0;
+    }
+    if(telemetry.mode==DRIVE_BASE_SPEED && telemetry.requested_cps[0]==-telemetry.requested_cps[2] && probe_count)
+    {
+      int32_t distance=abs32(counts[i]-probe_origins[probe_count-1][i]);
+      if(distance>max_probe_travel) max_probe_travel=distance;
+    }
+  }
+  if(telemetry.mode==DRIVE_BASE_POSITION && done)
+  {
+    memset(telemetry.requested_cps,0,sizeof telemetry.requested_cps);
+    telemetry.mode=DRIVE_BASE_STOPPED;
+    telemetry.position_state=DRIVE_POSITION_DONE;
+  }
+}
+static void sample(unsigned mask,uint32_t dt)
+{
+  LineTrackingReading r={mask&1,(mask>>1)&1,(mask>>2)&1,(mask>>3)&1};
+  plant(dt);
+  tick+=dt;
+  DriveBase_Task(tick);
+  line_tracking_compute(&r,3000,&output);
+  if(output.valid)
+  {
+    if(!output.left_cps&&!output.right_cps) DriveBase_Stop(DRIVE_STOP_COAST);
+    else DriveBase_SetSideCps(output.left_cps,output.right_cps);
+  }
+}
+static void hold(unsigned mask,uint32_t duration)
+{
+  while(duration) { uint32_t dt=duration>10?10:duration; sample(mask,dt); duration-=dt; }
+}
+static void reset(uint8_t forward,uint8_t smooth)
 {
   line_tracking_reset();
-  memset(&telemetry, 0, sizeof telemetry);
-  speed_commands = brake_commands = 0;
-  fault_on_task = 0;
+  memset(&telemetry,0,sizeof telemetry);
+  memset(counts,0,sizeof counts);
+  move_count=probe_count=0;
+  reject_move=0; max_probe_travel=0;
   line_tracking_set_no_line_forward(forward);
   line_tracking_set_smooth_mode(smooth);
 }
-static void hint(unsigned mask) { sample(mask, 1); sample(mask, 25); }
-static void assert_search(int side)
+static void wait_for_probe(unsigned number)
 {
-  int32_t magnitude = LINE_SEARCH_TARGET_CPS;
-  assert(!output.valid && telemetry.mode == DRIVE_BASE_SPEED);
-  assert(output.action == (side < 0 ? LINE_ACTION_SEARCH_LEFT :
-                                      LINE_ACTION_SEARCH_RIGHT));
-  assert(telemetry.requested_cps[1] ==
-         (side < 0 ? -magnitude : magnitude));
-  assert(telemetry.requested_cps[3] ==
-         (side < 0 ? magnitude : -magnitude));
-  assert(telemetry.requested_cps[0] == -telemetry.requested_cps[2]);
-  assert(telemetry.requested_cps[1] == -telemetry.requested_cps[3]);
-  assert(telemetry.requested_cps[0] == (side < 0 ? -magnitude : magnitude));
-  assert(telemetry.requested_cps[0] == telemetry.requested_cps[1]);
-  assert(telemetry.requested_cps[2] == telemetry.requested_cps[3]);
-  assert(side < 0 ? telemetry.requested_cps[0] < 0 :
-                   telemetry.requested_cps[0] > 0);
+  unsigned tries=0;
+  while(probe_count<number && tries++<500) sample(0,10);
+  assert(probe_count==number);
+  assert(!output.valid && telemetry.mode==DRIVE_BASE_SPEED);
+  assert(telemetry.requested_cps[0]==telemetry.requested_cps[1]);
+  assert(telemetry.requested_cps[2]==telemetry.requested_cps[3]);
+  assert(telemetry.requested_cps[0]==-telemetry.requested_cps[2]);
+  assert(abs32(telemetry.requested_cps[0])==LINE_SEARCH_TARGET_CPS);
 }
-static void start_search(int side)
+static void wait_for_stop(void)
 {
-  assert(sample(0, 1) == LINE_ACTION_STOP);
-  sample(0, 70);
-  assert_search(side);
-}
-static void finish_reverse(int side)
-{
-  unsigned before = speed_commands;
-  assert(!output.valid && telemetry.mode == DRIVE_BASE_BRAKING);
-  sample(0, 30);
-  assert(telemetry.mode == DRIVE_BASE_BRAKING && speed_commands == before);
-  sample(0, 22);
-  assert(output.valid && telemetry.mode == DRIVE_BASE_STOPPED);
-  sample(0, 69); assert(speed_commands == before);
-  sample(0, 1); assert_search(side);
-}
-static void capture(void)
-{
-  sample(5, 1); sample(5, 12);
-  assert(!output.valid && telemetry.mode == DRIVE_BASE_BRAKING);
-  sample(5, 30); assert(!output.valid);
-  sample(5, 22); sample(5, 1);
-  assert(output.valid && output.left_cps > 0 &&
-         output.left_cps == output.right_cps);
-  assert(telemetry.requested_cps[0] == telemetry.requested_cps[1]);
-  assert(telemetry.requested_cps[2] == telemetry.requested_cps[3]);
+  unsigned tries=0;
+  while((!output.valid || output.left_cps || output.right_cps) && tries++<800) sample(0,10);
+  assert(output.valid&&!output.left_cps&&!output.right_cps);
 }
 int main(void)
 {
-  unsigned smooth, forward;
-  /* Independent numeric references for the measured 129/129/47 mm chassis
-     and the existing rounded effective track of 338 mm. */
-  assert(VEHICLE_TRACK_WIDTH_MM == 129 && VEHICLE_WHEELBASE_MM == 129 &&
-         VEHICLE_WHEEL_DIAMETER_MM == 47);
-  assert(LINE_SEARCH_EFFECTIVE_TRACK_MM == 338);
-#if LINE_SEARCH_NOMINAL_YAW_MDEG_S == 120000L
-  const uint32_t probe_ms = 362U, first_ms = 1300U;
-  assert(LINE_SEARCH_TARGET_CPS == 2493);
-  assert(LINE_SEARCH_LEG_MS(2400U) == 3466U);
-#elif LINE_SEARCH_NOMINAL_YAW_MDEG_S == 90000L
-  const uint32_t probe_ms = 482U, first_ms = 1733U;
-  assert(LINE_SEARCH_TARGET_CPS == 1870);
-  assert(LINE_SEARCH_LEG_MS(2400U) == 4621U);
-#else
-#error "Add an independent numeric reference for a new test profile"
-#endif
-  assert(LINE_SEARCH_LEG_MS(250U) == probe_ms);
-  assert(LINE_SEARCH_LEG_MS(900U) == first_ms);
-  for (smooth = 0; smooth <= 1; ++smooth)
-  for (forward = 0; forward <= 1; ++forward)
+  unsigned smooth,forward,i;
+  for(smooth=0;smooth<=1;++smooth) for(forward=0;forward<=1;++forward)
   {
-    /* Most recent stable side wins over earlier departure history. */
-    reset((uint8_t)forward, (uint8_t)smooth);
-    sample(5, 1);
-    assert(telemetry.requested_cps[0] == telemetry.requested_cps[1]);
-    assert(telemetry.requested_cps[2] == telemetry.requested_cps[3]);
-    /* On-line sharp turns still use the original equal-axle commands. */
-    sample(2, 1); sample(2, 130);
-    assert(output.valid && output.action == LINE_ACTION_LEFT_SHARP);
-    assert(telemetry.requested_cps[0] == telemetry.requested_cps[1]);
-    assert(telemetry.requested_cps[2] == telemetry.requested_cps[3]);
-    reset((uint8_t)forward, (uint8_t)smooth);
-    sample(5, 1); hint(1); hint(8); start_search(1);
-    reset((uint8_t)forward, (uint8_t)smooth);
-    sample(5, 1); hint(4); hint(2); start_search(-1);
+    /* Loss immediately brakes, then reverses a known recent forward segment. */
+    reset((uint8_t)forward,(uint8_t)smooth);
+    hold(5,300); sample(0,10);
+    assert(!output.valid&&telemetry.mode==DRIVE_BASE_BRAKING);
+    hold(0,60);
+    assert(move_count==1&&telemetry.position_state==DRIVE_POSITION_RUNNING);
+    for(i=0;i<4;++i) assert(moves[0].delta_counts[i]<0&&moves[0].delta_counts[i]>=-316);
+    hold(5,160);
+    assert(output.valid&&output.left_cps>0&&output.right_cps>0);
+    /* The edge after capture must remain slow and forward, never sharp-spin. */
+    hold(2,160);
+    assert(output.valid&&output.left_cps>0&&output.right_cps>0);
+    assert(output.left_cps<=2400&&output.right_cps<=2400);
+    hold(5,550); assert(output.valid&&output.left_cps>2400&&output.left_cps==output.right_cps);
 
-    /* No reliable direction must produce exploration, not latched STOP. */
-    reset((uint8_t)forward, (uint8_t)smooth);
-    hint(4); sample(5, 1); sample(5, 81); start_search(-1);
-    sample(0, 250); assert_search(-1);
-    sample(0, probe_ms - 250); finish_reverse(1);
-    sample(0, 2U * probe_ms); finish_reverse(-1);
-    reset((uint8_t)forward, (uint8_t)smooth);
-    hint(4); sample(15, 1); start_search(-1);
-    reset((uint8_t)forward, (uint8_t)smooth);
-    hint(4); sample(2, 1); start_search(-1);
-    reset((uint8_t)forward, (uint8_t)smooth);
-    hint(4); sample(0, 201); sample(0, 70); assert_search(-1);
+    /* A new loss during uncommitted capture must not reset the deadline. */
+    reset((uint8_t)forward,(uint8_t)smooth); hold(5,300);
+    {
+      uint32_t lost_at=tick+10;
+      sample(0,10); hold(0,80); hold(5,150);
+      sample(0,10); assert(!output.valid&&telemetry.mode==DRIVE_BASE_BRAKING);
+      tick=lost_at+8001; sample(0,0);
+      assert(output.valid&&output.left_cps==0);
+    }
 
-    /* Search can continue beyond both old limits when sensors guide it.
-       Wheel counts are intentionally irrelevant to recovery termination. */
-    reset((uint8_t)forward, (uint8_t)smooth);
-    hint(1); start_search(-1);
-    telemetry.position_moved_counts[0] = -100000;
-    telemetry.position_moved_counts[2] = 100000;
-    sample(2, 3000); assert_search(-1);
-    capture();
-    sample(5, 250); assert(output.left_cps > 0);
-    sample(5, 5000); assert(output.left_cps > 0);
+    /* Backtrack distance is capped even if counts report a large overshoot. */
+    reset((uint8_t)forward,(uint8_t)smooth); hold(5,300);
+    for(i=0;i<4;++i) counts[i]+=1000;
+    sample(0,10); hold(0,60);
+    assert(move_count==1);
+    for(i=0;i<4;++i) assert(moves[0].delta_counts[i]==-316);
 
-    /* A confirmed opposite outer hit corrects the initial prediction. */
-    reset((uint8_t)forward, (uint8_t)smooth);
-    hint(1); start_search(-1);
-    sample(8, 1); sample(8, 19); assert_search(-1);
-    sample(8, 1); finish_reverse(1);
-    capture();
+    /* White chatter that clears during braking must not force reversal. */
+    reset((uint8_t)forward,(uint8_t)smooth); hold(5,300);
+    sample(0,10); hold(5,130);
+    assert(move_count==0&&probe_count==0&&output.left_cps>0);
 
-    /* An empty leg reverses and widens, rather than ending in STOP. */
-    reset((uint8_t)forward, (uint8_t)smooth);
-    hint(1); start_search(-1);
-    sample(0, 900); assert_search(-1);
-    sample(0, first_ms - 900); finish_reverse(1);
-    sample(0, first_ms); assert_search(1);
-    sample(0, first_ms); finish_reverse(-1);
+    /* No history: two local probes, each undone before trying the other side.
+       There is no position-reset fiction: actual four-wheel counts are used. */
+    reset(0,(uint8_t)smooth);
+    wait_for_probe(1);
+    assert(telemetry.requested_cps[0]<0);
+    wait_for_probe(2);
+    assert(telemetry.requested_cps[0]>0&&move_count==1);
+    for(i=0;i<4;++i)
+    {
+      assert(move_origins[0][i]+moves[0].delta_counts[i]==probe_origins[0][i]);
+      assert(abs32(probe_origins[1][i]-probe_origins[0][i])<=12);
+    }
+    wait_for_stop(); assert(move_count==2);
+    for(i=0;i<4;++i) assert(abs32(counts[i])<=24);
+    assert(max_probe_travel<=197+LINE_SEARCH_TARGET_CPS/100);
+    hold(5,100); assert(output.left_cps==0);
 
-    /* One-frame centre chatter cannot capture while stationary either. */
-    reset((uint8_t)forward, (uint8_t)smooth);
-    hint(1); sample(0, 1); sample(5, 10); sample(0, 60);
-    assert_search(-1);
-    sample(5, 1); sample(0, 1); assert_search(-1);
+    /* Do not reverse a history that crossed an ordinary in-place sharp turn. */
+    reset((uint8_t)forward,(uint8_t)smooth); hold(5,300); hold(2,150);
+    assert(telemetry.requested_cps[0]<0);
+    sample(0,10); hold(0,60); assert(move_count==0);
 
-    /* Failed capture keeps the episode watchdog, but has no angle budget. */
-    reset((uint8_t)forward, (uint8_t)smooth);
-    hint(1); start_search(-1); capture();
-    sample(0, 1); sample(0, 70); assert_search(-1);
-    sample(2, 7800);
-    assert(output.valid && output.left_cps == 0);
-    sample(5, 300); assert(output.left_cps == 0);
+    /* A real opposite outer hit rolls back first rather than sweeping farther. */
+    reset((uint8_t)forward,(uint8_t)smooth);
+    hold(8,40); wait_for_probe(1);
+    assert(telemetry.requested_cps[0]>0);
+    hold(2,30); assert(telemetry.mode==DRIVE_BASE_BRAKING);
+    wait_for_probe(2); assert(telemetry.requested_cps[0]<0);
+    hold(5,150); assert(output.valid&&output.left_cps>0&&output.right_cps>0);
 
-    reset((uint8_t)forward, (uint8_t)smooth);
-    hint(1); start_search(-1); fault_on_task = 1;
-    sample(0, 1); assert(output.valid && output.left_cps == 0);
-    sample(5, 300); assert(output.left_cps == 0);
+    /* Constant matching outer evidence has a finite travel budget too. */
+    reset(0,(uint8_t)smooth); wait_for_probe(1);
+    hold(2,300);
+    assert(move_count>=1&&max_probe_travel>197);
+    assert(max_probe_travel<=394+LINE_SEARCH_TARGET_CPS/100);
 
-    /* User mode reset must stop a directly owned search or brake. */
-    reset((uint8_t)forward, (uint8_t)smooth);
-    hint(1); start_search(-1);
-    line_tracking_reset(); assert(telemetry.mode == DRIVE_BASE_STOPPED);
-    sample(5, 1); assert(output.left_cps > 0);
+    /* Brief centre noise in a probe does not release to forward mode. */
+    reset(0,(uint8_t)smooth); wait_for_probe(1);
+    hold(5,10); assert(telemetry.mode==DRIVE_BASE_BRAKING);
+    hold(0,10); assert(!output.valid);
+    hold(0,240); assert(!(output.valid&&output.left_cps>0&&output.right_cps>0));
+
+    /* False contact during rollback must still finish returning to the
+       original probe reference before the opposite probe starts. */
+    reset(0,(uint8_t)smooth); wait_for_probe(1);
+    {
+      unsigned tries=0;
+      while(telemetry.mode!=DRIVE_BASE_POSITION && tries++<100) sample(0,10);
+      assert(telemetry.mode==DRIVE_BASE_POSITION);
+      hold(5,10); assert(telemetry.mode==DRIVE_BASE_BRAKING);
+      wait_for_probe(2);
+      for(i=0;i<4;++i) assert(abs32(probe_origins[1][i]-probe_origins[0][i])<=12);
+    }
+
+    /* Old line evidence cannot authorize a blind retreat. */
+    reset((uint8_t)forward,(uint8_t)smooth); hold(5,300);
+    tick+=700; sample(0,0); hold(0,60); assert(move_count==0);
+    wait_for_probe(1);
+
+    /* Fault and rejected replay start cannot be overridden by recovery. */
+    reset((uint8_t)forward,(uint8_t)smooth); hold(5,300);
+    reject_move=1; sample(0,10); hold(0,60);
+    assert(output.valid&&output.left_cps==0);
+    reset(0,(uint8_t)smooth); wait_for_probe(1);
+    reject_move=1; hold(0,600);
+    assert(output.valid&&output.left_cps==0&&probe_count==1);
+    reset(0,(uint8_t)smooth); wait_for_probe(1);
+    telemetry.fault_mask=DRIVE_FAULT_MOTOR3; sample(0,10);
+    assert(output.valid&&output.left_cps==0);
+    hold(5,100); assert(output.left_cps==0);
+
+    /* Unexpected large encoder displacement never causes a huge rollback. */
+    reset(0,(uint8_t)smooth); wait_for_probe(1);
+    counts[0]+=2000; sample(0,1); hold(0,70);
+    assert(output.valid&&output.left_cps==0&&move_count==0);
+
+    /* Whole-episode watchdog remains active while forward capture is pending. */
+    reset((uint8_t)forward,(uint8_t)smooth); hold(5,300);
+    sample(0,10); hold(0,80); hold(5,150); assert(output.left_cps>0);
+    tick+=8001; sample(2,0); assert(output.valid&&output.left_cps==0);
+
+    /* Reset during position motion releases motor ownership. */
+    reset((uint8_t)forward,(uint8_t)smooth); hold(5,300);
+    sample(0,10); hold(0,60);
+    line_tracking_reset(); assert(telemetry.mode==DRIVE_BASE_STOPPED);
   }
-  reset(1, 1); assert(sample(0, 1) == LINE_ACTION_FORWARD);
-  reset(0, 1); start_search(-1);
-  tick = UINT32_MAX - 15;
-  reset(0, 1); hint(1); start_search(-1);
-  printf("PASS nominal_yaw=%ld cps=%ld: geometry conversion, symmetric wheel targets, on-line isolation, direction, reversals, capture, watchdog, faults, reset, tick rollover\n",
-         (long)LINE_SEARCH_NOMINAL_YAW_MDEG_S, (long)LINE_SEARCH_TARGET_CPS);
+  reset(1,1); sample(0,10); assert(output.left_cps>0);
+  tick=UINT32_MAX-30; reset(0,1); wait_for_probe(1); wait_for_stop();
+  printf("PASS CPS=%ld: initial brake, bounded history retreat, probe rollback, opposite-side retry, stationary capture, slow edge follow, limits, faults, reset, wrap\n",(long)LINE_SEARCH_TARGET_CPS);
   return 0;
 }

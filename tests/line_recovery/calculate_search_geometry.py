@@ -98,13 +98,28 @@ def main():
         "candidate_left_search_cps_M1_M2_M3_M4": [-q, -q, q, q],
         "candidate_right_search_cps_M1_M2_M3_M4": [q, q, -q, -q],
         "candidate_wheel_circumferential_mm_s": q * math.pi * d / n,
-        "leg_timers_ms": {str(t): math.ceil(t * 3600 / q) for t in (250, 900, 2400)},
         "episode_watchdog_ms": 8000,
         "centre_pivot_wheel_path_radius_mm": math.hypot(length / 2, b / 2),
         "rear_pivot_front_path_radius_mm": math.hypot(length, b / 2),
         "rear_pivot_rear_path_radius_mm": b / 2,
         "rear_pivot_body_lateral_mm_s_at_nominal_yaw": math.radians(yaw / 1000) * length / 2,
         "physical_pivot_verified": False,
+    }
+    recovery_text = (ROOT / "Core/Src/line_recovery.c").read_text(encoding="utf-8-sig")
+    report["local_recovery_wheel_travel_limits_not_chassis_distance"] = {}
+    for name in ("BACKTRACK_COUNTS", "PROBE_COUNTS", "EDGE_COUNTS", "ROLLBACK_LIMIT"):
+        match = re.search(r"^#define\s+" + name + r"\s+MM_COUNTS\((\d+)\)",
+                          recovery_text, re.MULTILINE)
+        if not match:
+            raise ValueError(f"Missing recovery distance constant: {name}")
+        mm = int(match.group(1))
+        count = mm * 1000000 * n // (3141593 * d)
+        report["local_recovery_wheel_travel_limits_not_chassis_distance"][name] = {
+            "nominal_wheel_mm": mm, "counts": count,
+        }
+    report["local_recovery_timeouts_ms"] = {
+        name: literal("Core/Src/line_recovery.c", name)
+        for name in ("EPISODE_TIMEOUT_MS", "MOVE_TIMEOUT_MS", "PROBE_TIMEOUT_MS", "EDGE_TIMEOUT_MS")
     }
     pose = (args.dx_mm, args.dy_mm, args.angle_deg)
     if any(v is not None for v in pose):

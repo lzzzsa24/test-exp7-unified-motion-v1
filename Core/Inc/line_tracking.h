@@ -47,10 +47,10 @@ typedef struct
 void line_tracking_init(void);
 void line_tracking_reset(void);
 /* enable=1：尚未见过黑线时允许无黑线直行；enable=0 或已经见过黑线：
-   全白时按近期稳定位置执行四轮差速搜索；无方向时短时左右试探。
-   外侧探头可引导换向，一侧未找到则扩大反向搜索，不设固定角度截止。
-   中间 X1/X3 稳定确认后制动并低速捕线；整个恢复过程超过 8 秒或驱动
-   故障才锁定停车，需停止后重新选择模式。 */
+   全白时先制动并限程回溯近期见线轮迹，之后在局部左右试探。
+   失败试探先按编码器回退到其起点，再试另一侧，避免累计向外盲转。
+   重新见线需停车确认和至少 500 ms 低速跟随；两侧均失败、8 秒超时
+   或驱动故障则停车，需重新选模式。回溯不等于真实车身位置复原。 */
 void line_tracking_set_no_line_forward(uint8_t enable);
 /* enable=1: use filtered PD differential steering as the line-position outer
    loop. Wheel-speed feedback remains in DriveBase. */
