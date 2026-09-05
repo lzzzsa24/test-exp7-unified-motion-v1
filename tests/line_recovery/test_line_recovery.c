@@ -23,6 +23,7 @@ uint32_t HAL_GetTick(void) { return tick; }
 int HAL_GPIO_ReadPin(GPIO_TypeDef *p, uint16_t n) { (void)p; (void)n; return 1; }
 void HAL_GPIO_Init(GPIO_TypeDef *p, GPIO_InitTypeDef *g) { (void)p; (void)g; }
 int32_t DriveBase_EquivalentCpsFromPwm(int16_t p) { return p; }
+void DriveBase_PrepareLineTurnAssist(int32_t l, int32_t r) { (void)l; (void)r; }
 void WheelEncoder_GetCounts(WheelEncoderCounts *c)
 { c->motor1=counts[0]; c->motor2=counts[1]; c->motor3=counts[2]; c->motor4=counts[3]; }
 void DriveBase_GetTelemetry(DriveBaseTelemetry *t) { *t=telemetry; }

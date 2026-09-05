@@ -93,6 +93,11 @@ void DriveBase_SetWheelCps(int32_t motor1_cps,
                            int32_t motor4_cps);
 void DriveBase_SetSideCps(int32_t left_cps, int32_t right_cps);
 
+/* Arm only the next matching SetWheel/SideCps call (within 20 ms). The claim
+   is consumed even on rejection; ordinary callers never renew it. Assistance
+   expires after 60 ms without a newly armed, accepted command. No motion here. */
+void DriveBase_PrepareLineTurnAssist(int32_t left_cps, int32_t right_cps);
+
 /* Compatibility conversion for existing high-level modules whose tuned
    parameters are still expressed in logical PWM units. */
 int32_t DriveBase_EquivalentCpsFromPwm(int16_t signed_pwm);

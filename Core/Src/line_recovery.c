@@ -330,6 +330,7 @@ LineRecoveryResult LineRecovery_Step(const LineTrackingReading *r,
   if (phase == REC_PROBE)
   {
     int32_t left = side < 0 ? -LINE_SEARCH_TARGET_CPS : LINE_SEARCH_TARGET_CPS;
+    DriveBase_PrepareLineTurnAssist(left, -left);
     DriveBase_SetWheelCps(left, left, -left, -left);
   }
   return phase == REC_FAILED ? LINE_RECOVERY_FAILED : LINE_RECOVERY_BUSY;
