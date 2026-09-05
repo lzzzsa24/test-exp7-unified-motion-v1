@@ -145,7 +145,8 @@ static void test_real_retrace_capture(void)
   DriveBaseTelemetry t;
   LineTrackingCommand output={0};
   LineTrackingReading reading={1,0,1,0};
-  uint8_t saw_position=0, found=0;
+  uint8_t saw_reverse=0, found=0;
+  int32_t reverse_origin=0;
   uint32_t found_ms=0;
   unsigned ms,i;
   line_tracking_reset(); reset();
@@ -158,13 +159,15 @@ static void test_real_retrace_capture(void)
     for(i=0;i<4;++i) counts[i]+=pins[i]>0?4:(pins[i]<0?-4:0);
     ++tick; DriveBase_Task(tick); DriveBase_GetTelemetry(&t);
     assert(!t.fault_mask);
+    assert(t.mode!=DRIVE_BASE_POSITION);
     if(ms>=300 && !found)
     {
       reading.x1_black=reading.x3_black=0;
-      if(t.mode==DRIVE_BASE_POSITION)
+      if(t.mode==DRIVE_BASE_SPEED && t.requested_cps[0]<0 && t.requested_cps[2]<0)
       {
-        saw_position=1;
-        if(absolute(t.position_moved_counts[0])>=20)
+        if(!saw_reverse) reverse_origin=counts[0];
+        saw_reverse=1;
+        if(absolute(counts[0]-reverse_origin)>=20)
         { found=1; found_ms=tick; }
       }
     }
@@ -177,11 +180,37 @@ static void test_real_retrace_capture(void)
     }
     if(found && tick-found_ms>750) break;
   }
-  assert(saw_position && found && tick-found_ms>750);
+  assert(saw_reverse && found && tick-found_ms>750);
   assert(output.valid && output.left_cps==5273 && output.right_cps==5273);
   assert(!DriveBase_GetFaultMask());
   line_tracking_reset(); DriveBase_Stop(DRIVE_STOP_COAST);
-  puts("PASS: real line loss -> position retrace -> middle hit -> brake -> slow capture -> normal");
+  puts("PASS: real line loss -> continuous retreat -> middle hit -> brake -> slow capture -> normal (no position mode)");
+}
+static void test_real_white_search(void)
+{
+  LineTrackingReading white={0};
+  LineTrackingCommand output={0};
+  DriveBaseTelemetry t;
+  unsigned ms,i;
+  uint8_t spun=0;
+  line_tracking_reset(); reset(); line_tracking_set_no_line_forward(0);
+  for(ms=0;ms<8500;++ms)
+  {
+    for(i=0;i<4;++i) counts[i]+=pins[i]>0?3:(pins[i]<0?-3:0);
+    ++tick; DriveBase_Task(tick); DriveBase_GetTelemetry(&t);
+    assert(!t.fault_mask && t.mode!=DRIVE_BASE_POSITION);
+    if(t.mode==DRIVE_BASE_SPEED && t.requested_cps[0]==-t.requested_cps[2] && t.requested_cps[0]) spun=1;
+    line_tracking_compute(&white,3000,&output);
+    if(output.valid)
+    {
+      if(!output.left_cps && !output.right_cps) DriveBase_Stop(DRIVE_STOP_COAST);
+      else DriveBase_SetSideCps(output.left_cps,output.right_cps);
+    }
+    if(spun && output.valid && !output.left_cps && !output.right_cps) break;
+  }
+  assert(spun && ms>1000 && ms<8100 && !DriveBase_GetFaultMask());
+  for(i=0;i<4;++i) assert(pins[i]==0);
+  puts("PASS: real all-white recovery stays in speed mode and ends without position timeout/sync faults");
 }
 int main(void)
 {
@@ -279,6 +308,7 @@ int main(void)
   test_position_coast_handoff(1);
   test_position_coast_handoff(-1);
   test_real_retrace_capture();
+  test_real_white_search();
   (void)trace(2500,-2500,0,1);
   for(i=0;i<4;++i) sample(creep);
   assert(pins[0]<3000);
