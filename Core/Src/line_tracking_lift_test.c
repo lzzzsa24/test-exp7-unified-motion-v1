@@ -11,8 +11,8 @@
 #define LIFT_TEST_BASE_PWM               3000
 #define LIFT_TEST_CENTER_MS               250U
 #define LIFT_TEST_DIRECTION_HINT_MS       120U
-#define LIFT_TEST_LOST_SEARCH_MS          350U
-#define LIFT_TEST_OUTER_ONLY_MS           300U
+#define LIFT_TEST_LOST_SEARCH_MS          150U
+#define LIFT_TEST_OUTER_ONLY_MS            80U
 #define LIFT_TEST_CENTER_CAPTURE_MS       450U
 #define LIFT_TEST_FINAL_CENTER_MS         350U
 #define LIFT_TEST_MAX_CAPTURE_PAUSE_MS     120U
@@ -48,11 +48,6 @@ static LineTrackingReading reading_from_mask(uint8_t mask)
   reading.x3_black = (mask & 0x04U) != 0U ? 1U : 0U;
   reading.x4_black = (mask & 0x08U) != 0U ? 1U : 0U;
   return reading;
-}
-
-static int32_t abs_i32(int32_t value)
-{
-  return value < 0L ? -value : value;
 }
 
 static void apply_command(const LineTrackingCommand *command)
@@ -164,7 +159,8 @@ void LineTrackingLiftTest_Run(void)
     fail_mask |= LIFT_TEST_FAIL_INITIAL_FORWARD;
   }
 
-  /* All white starts the encoder-bounded left rear-pivot search. */
+  /* All white starts the bounded four-wheel left search. Keep the synthetic
+     outer phase short enough to capture within the 85-degree travel budget. */
   run_phase(0x00U, LIFT_TEST_LOST_SEARCH_MS, 0U, &lost);
   if (lost.search_samples == 0U)
   {
@@ -185,10 +181,8 @@ void LineTrackingLiftTest_Run(void)
   }
   if (outer_end.motor1 >= outer_start.motor1 - 20L ||
       outer_end.motor3 <= outer_start.motor3 + 20L ||
-      abs_i32(outer_end.motor2 - outer_start.motor2) > 20L ||
-      abs_i32(outer_end.motor4 - outer_start.motor4) > 20L ||
-      outer_end.motor3 - outer_start.motor3 <=
-          abs_i32(outer_end.motor1 - outer_start.motor1) + 20L)
+      outer_end.motor2 >= outer_start.motor2 - 20L ||
+      outer_end.motor4 <= outer_start.motor4 + 20L)
   {
     fail_mask |= LIFT_TEST_FAIL_ENCODER_DIRECTION;
   }

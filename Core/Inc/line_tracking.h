@@ -47,8 +47,10 @@ typedef struct
 void line_tracking_init(void);
 void line_tracking_reset(void);
 /* enable=1：尚未见过黑线时允许无黑线直行；enable=0 或已经见过黑线：
-   全白时按预测方向执行最多 360 度的编码器位置搜线。外侧 X2/X4 只预告
-   黑线，必须由中间 X1/X3 稳定确认后才退出搜索；没有方向历史则停车。 */
+   全白时按近期稳定位置执行四轮差速搜索，单次丢线累计不超过编码器
+   估算 85 度且最长 2500 ms（包含捕线重试）。外侧 X2/X4 只预告黑线，
+   必须由中间 X1/X3 稳定确认后才退出搜索；方向不明确或耗尽预算则
+   停车，需停止后重新选择模式。编码器角度不代表真实车身角度。 */
 void line_tracking_set_no_line_forward(uint8_t enable);
 /* enable=1: use filtered PD differential steering as the line-position outer
    loop. Wheel-speed feedback remains in DriveBase. */
