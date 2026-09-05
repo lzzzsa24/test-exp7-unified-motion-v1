@@ -4,7 +4,6 @@
 typedef struct { uint32_t IDR; } GPIO_TypeDef;
 typedef struct { uint32_t BDTR, CCR1, CCR2, CCR3, CCR4; } TIM_TypeDef;
 typedef struct { uint32_t CR1, CR2, CR3, BRR, SR, DR; } USART_TypeDef;
-typedef struct { uint32_t KR, PR, RLR, SR; } IWDG_TypeDef;
 typedef struct { uint32_t CYCCNT, CTRL; } DWT_Type;
 typedef struct { uint32_t DEMCR; } CoreDebug_Type;
 typedef enum { GPIO_PIN_RESET, GPIO_PIN_SET } GPIO_PinState;
@@ -19,7 +18,6 @@ typedef struct {
 extern GPIO_TypeDef test_gpio[7];
 extern TIM_TypeDef test_timer1, test_timer8;
 extern USART_TypeDef test_usart;
-extern IWDG_TypeDef test_iwdg;
 extern DWT_Type test_dwt;
 extern CoreDebug_Type test_debug;
 extern uint32_t SystemCoreClock, test_tick, test_exti, test_remap;
@@ -33,7 +31,6 @@ extern uint32_t SystemCoreClock, test_tick, test_exti, test_remap;
 #define TIM1 (&test_timer1)
 #define TIM8 (&test_timer8)
 #define USART1 (&test_usart)
-#define IWDG (&test_iwdg)
 #define DWT (&test_dwt)
 #define CoreDebug (&test_debug)
 #define CoreDebug_DEMCR_TRCENA_Msk 1U

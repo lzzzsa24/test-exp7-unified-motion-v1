@@ -33,7 +33,6 @@ int main(void)
   Board_Init();
   last_control = last_report = HAL_GetTick();
   Line_Init(&line, last_control);
-  Board_WatchdogStart();
   Board_Report(&line);
   for (;;) {
     uint32_t now = HAL_GetTick();
@@ -45,8 +44,6 @@ int main(void)
       Line_Step(&line, Board_ReadLine(), now);
       motor_pwm_set_sides(line.left_pwm, line.right_pwm, now);
       last_control = now;
-      /* Only a completed control pass feeds the hardware watchdog. */
-      Board_WatchdogFeed();
       Board_Indicators(&line, now);
       if (events || line.mode != old_mode || now - last_report >= 200U) {
         Board_Report(&line);
@@ -63,7 +60,7 @@ void Error_Handler(void)
 {
   __disable_irq();
   motor_pwm_emergency_stop();
-  /* If IWDG was enabled it resets into STOP; otherwise outputs stay off. */
+  /* Processor/clock faults still disable the hardware outputs. */
   for (;;) { }
 }
 

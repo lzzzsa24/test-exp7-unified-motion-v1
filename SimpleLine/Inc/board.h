@@ -7,6 +7,4 @@ uint8_t Board_ReadLine(void);
 uint8_t Board_Inputs(uint32_t now);
 void Board_Indicators(const LineFollower *line, uint32_t now);
 void Board_Report(const LineFollower *line);
-void Board_WatchdogStart(void);
-void Board_WatchdogFeed(void);
 #endif

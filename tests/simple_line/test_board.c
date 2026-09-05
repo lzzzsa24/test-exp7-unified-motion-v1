@@ -8,7 +8,6 @@
 GPIO_TypeDef test_gpio[7];
 TIM_TypeDef test_timer1, test_timer8;
 USART_TypeDef test_usart;
-IWDG_TypeDef test_iwdg;
 DWT_Type test_dwt;
 CoreDebug_Type test_debug;
 uint32_t SystemCoreClock = 72000000U, test_tick, test_exti, test_remap;
@@ -135,6 +134,20 @@ static void receive(uint8_t command)
   USART1_IRQHandler();
 }
 
+static void remote_stop_frame(void)
+{
+  unsigned bit;
+  uint32_t frame = 0xF20DFF00U; /* Yahboom remote number 0. */
+  DWT->CYCCNT += 13500U * 72U;
+  test_exti |= IR_REMOTE_Pin;
+  EXTI15_10_IRQHandler();
+  for (bit = 0U; bit < 32U; ++bit) {
+    DWT->CYCCNT += ((frame & ((uint32_t)1U << bit)) ? 2250U : 1125U) * 72U;
+    test_exti |= IR_REMOTE_Pin;
+    EXTI15_10_IRQHandler();
+  }
+}
+
 static void test_board_io(void)
 {
   unsigned i, mask;
@@ -166,7 +179,13 @@ static void test_board_io(void)
   GPIOG->IDR |= GPIO_PIN_5;
   USART1->SR = USART_SR_ORE;
   USART1_IRQHandler();
-  CHECK(Board_Inputs(20U) == INPUT_STOP);
+  CHECK(Board_Inputs(20U) == 0U);
+  USART1->SR = USART_SR_RXNE | USART_SR_FE;
+  USART1->DR = '0';
+  USART1_IRQHandler();
+  CHECK(Board_Inputs(21U) == 0U); /* A corrupt byte must not invent STOP. */
+  receive('0');
+  CHECK(Board_Inputs(22U) == INPUT_STOP); /* Next valid command still works. */
   /* IRQ-driven telemetry can be busy while incoming STOP is still accepted. */
   Line_Init(&line, 20U);
   line.raw = line.filtered = 10U;
@@ -179,13 +198,32 @@ static void test_board_io(void)
     if (i == 2U) receive('0');
   }
   CHECK(strstr(text, "raw=1010 line=1010") != NULL);
+  CHECK(strncmp(text, "SL2 STOP USER", 13U) == 0);
   CHECK(Board_Inputs(25U) == INPUT_STOP);
   line.raw = 8U;
   Board_Indicators(&line, 30U);
   CHECK(output_pins[6] & GPIO_PIN_1);
   CHECK(!(output_pins[4] & (GPIO_PIN_2 | GPIO_PIN_3 | GPIO_PIN_7)));
-  Board_WatchdogStart();
-  CHECK(IWDG->PR == 4U && IWDG->RLR == 124U && IWDG->KR == 0xAAAAU);
+  /* Drive from an all-white start and route a real decoded remote STOP
+   * through the controller and PWM driver after a long simulated search. */
+  test_tick = 1000U;
+  motor_pwm_init();
+  Line_Start(&line, test_tick);
+  Line_Step(&line, 0U, test_tick);
+  motor_pwm_set_sides(line.left_pwm, line.right_pwm, test_tick);
+  CHECK(TIM8->CCR1 > 0U && TIM1->CCR1 > 0U);
+  test_tick += 300000U;
+  Line_Step(&line, 0U, test_tick);
+  motor_pwm_set_sides(line.left_pwm, line.right_pwm, test_tick);
+  Board_Indicators(&line, test_tick);
+  CHECK(line.mode == LINE_SEARCH && (output_pins[6] & led2_Pin));
+  remote_stop_frame();
+  CHECK(Board_Inputs(test_tick) == INPUT_STOP);
+  Line_Stop(&line, LINE_USER_STOP);
+  motor_pwm_set_sides(line.left_pwm, line.right_pwm, test_tick);
+  motors_zero();
+  Line_Step(&line, 0U, test_tick + 5000U);
+  CHECK(line.mode == LINE_STOP && line.left_pwm == 0 && line.right_pwm == 0);
 }
 
 int main(void)

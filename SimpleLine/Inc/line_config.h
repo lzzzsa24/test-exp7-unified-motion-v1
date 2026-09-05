@@ -8,13 +8,9 @@
 #define LINE_SLOW_PWM         2200
 #define LINE_OUTER_PWM        2600
 #define LINE_TURN_PWM         2700
-#define LINE_GAP_MS             60U
-#define LINE_HINT_MAX_AGE_MS    250U
-#define LINE_MANEUVER_MS        900U
-#define LINE_CENTER_CONFIRM_MS   30U
-#define LINE_WIDE_MS            300U
-#define LINE_LOOP_TIMEOUT_MS     50U
-#define LINE_SENSOR_TIMEOUT_MS   50U
+/* No search/turn/line/loop deadline: only operator commands stop driving.
+ * With no previous left/right evidence, search left (-1); +1 selects right. */
+#define LINE_DEFAULT_SEARCH_DIRECTION (-1)
 #define MOTOR_REVERSE_COAST_MS   10U
 
 #endif

@@ -105,9 +105,8 @@ void USART1_IRQHandler(void)
   uint32_t status = USART1->SR;
   if (status & (USART_SR_RXNE | USART_SR_ORE | USART_SR_FE | USART_SR_NE | USART_SR_PE)) {
     uint8_t byte = (uint8_t)USART1->DR; /* SR then DR clears error flags. */
-    if (status & (USART_SR_ORE | USART_SR_FE | USART_SR_NE | USART_SR_PE))
-      input_events |= INPUT_STOP;
-    else
+    /* Discard corrupt input; a UART error is not an operator STOP command. */
+    if (!(status & (USART_SR_ORE | USART_SR_FE | USART_SR_NE | USART_SR_PE)))
       input_events |= Input_Serial(byte);
   }
   if ((status & USART_SR_TXE) && (USART1->CR1 & USART_CR1_TXEIE)) {
@@ -136,7 +135,7 @@ void Board_Report(const LineFollower *line)
   uint32_t primask;
   if (tx_length != 0U) return; /* Drop busy telemetry; never delay control. */
   count = snprintf(tx_buffer, sizeof(tx_buffer),
-    "SL1 %s %s raw=%u%u%u%u line=%u%u%u%u L=%d R=%d\r\n",
+    "SL2 %s %s raw=%u%u%u%u line=%u%u%u%u L=%d R=%d\r\n",
     Line_ModeName(line->mode), Line_ReasonName(line->reason),
     (unsigned)((line->raw >> 3U) & 1U), (unsigned)((line->raw >> 2U) & 1U),
     (unsigned)((line->raw >> 1U) & 1U), (unsigned)(line->raw & 1U),
@@ -158,7 +157,6 @@ void Board_Indicators(const LineFollower *line, uint32_t now)
   static LineReason previous_reason = LINE_USER_STOP;
   static uint8_t beeping;
   static uint32_t beep_at;
-  uint8_t fault = line->mode == LINE_STOP && line->reason != LINE_USER_STOP;
   if (line->reason != previous_reason) {
     beeping = 1U;
     beep_at = now;
@@ -167,25 +165,10 @@ void Board_Indicators(const LineFollower *line, uint32_t now)
   if (now - beep_at >= 100U) beeping = 0U;
   HAL_GPIO_WritePin(GPIOG, Buzzer_Pin, beeping ? GPIO_PIN_SET : GPIO_PIN_RESET);
   HAL_GPIO_WritePin(GPIOG, led1_Pin, line->mode != LINE_STOP ? GPIO_PIN_SET : GPIO_PIN_RESET);
-  HAL_GPIO_WritePin(GPIOG, led2_Pin, fault ? GPIO_PIN_SET : GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOG, led2_Pin, line->mode == LINE_SEARCH ? GPIO_PIN_SET : GPIO_PIN_RESET);
   /* Four RGB components mirror the raw sensors, even while stopped. */
   HAL_GPIO_WritePin(GPIOG, LRGB_R_Pin, (line->raw & LINE_LO) ? GPIO_PIN_SET : GPIO_PIN_RESET);
   HAL_GPIO_WritePin(GPIOE, LRGB_G_Pin, (line->raw & LINE_LI) ? GPIO_PIN_SET : GPIO_PIN_RESET);
   HAL_GPIO_WritePin(GPIOE, RRGB_G_Pin, (line->raw & LINE_RI) ? GPIO_PIN_SET : GPIO_PIN_RESET);
   HAL_GPIO_WritePin(GPIOE, RRGB_R_Pin, (line->raw & LINE_RO) ? GPIO_PIN_SET : GPIO_PIN_RESET);
 }
-
-void Board_WatchdogStart(void)
-{
-  uint32_t began = HAL_GetTick();
-  IWDG->KR = 0xCCCCU;
-  IWDG->KR = 0x5555U;
-  IWDG->PR = 4U; /* LSI / 64; nominal 200 ms at 40 kHz, oscillator-dependent. */
-  IWDG->RLR = 124U;
-  while (IWDG->SR != 0U) {
-    if (HAL_GetTick() - began > 20U) Error_Handler();
-  }
-  Board_WatchdogFeed();
-}
-
-void Board_WatchdogFeed(void) { IWDG->KR = 0xAAAAU; }
