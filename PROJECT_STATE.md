@@ -11,22 +11,22 @@ or physical test.
 state_schema_version: 1
 state_updated_at: 2026-09-05
 integration_branch: feature/line-reacquire-lock
-repository_head_at_update: 62d29ba
-latest_code_commit: dec0a27
-flashed_source_commit: dec0a27
-flash_record_commit: 62d29ba
-deployed_tag: deployed/2026-09-05-geometry-line-search
+repository_head_at_update: cd57a52
+latest_code_commit: aebf230
+flashed_source_commit: aebf230
+flash_record_commit: cd57a52
+deployed_tag: deployed/2026-09-05-bounded-retrace
 formal_bin_path: manual-build-unified-motion/exp7_unified_motion.bin
 formal_hex_path: manual-build-unified-motion/exp7_unified_motion.hex
-formal_bin_size_bytes: 63796
-flashed_bin_sha256: 15BE841FDB40707F93DED4C3058B02057C9460C6ACA018B733FDFCAB8F4AEA89
-flashed_hex_sha256: A9B1C95DBC80FDA656BFE14346EFD09A85BDF7983971D72402C170D52A290E3B
-ground_test_status: geometry_line_search_flashed_ground_test_pending_buzzer_passed
+formal_bin_size_bytes: 66144
+flashed_bin_sha256: 57D40B6C395083912755C44FE93158F6BD47059952207EFF67F4A342D0373717
+flashed_hex_sha256: 7FB063273C5854347A695E5DD8C851A4FE44853BCF768816F1F994EDA64E4F9E
+ground_test_status: bounded_retrace_flashed_ground_test_pending_buzzer_passed
 k210_status: removed
-candidate_source_commit: dec0a27
-candidate_bin_size_bytes: 63796
-candidate_bin_sha256: 15BE841FDB40707F93DED4C3058B02057C9460C6ACA018B733FDFCAB8F4AEA89
-candidate_hex_sha256: A9B1C95DBC80FDA656BFE14346EFD09A85BDF7983971D72402C170D52A290E3B
+candidate_source_commit: aebf230
+candidate_bin_size_bytes: 66144
+candidate_bin_sha256: 57D40B6C395083912755C44FE93158F6BD47059952207EFF67F4A342D0373717
+candidate_hex_sha256: 7FB063273C5854347A695E5DD8C851A4FE44853BCF768816F1F994EDA64E4F9E
 user_reported_flash: tool_verified_current_candidate
 ```
 
@@ -38,22 +38,22 @@ checker requires the anchor to remain an ancestor and prints the live HEAD.
 
 - Repository: `F:\myproject\jidian\project\test-exp7-unified-motion-v1`
 - Integration branch: `feature/line-reacquire-lock`
-- Latest firmware source commit: `dec0a27` (`Derive symmetric line search targets from chassis geometry`), now flashed. It applies the requested `18774a2` change on top of the current integration history, retaining the buzzer GPIO fix, adaptive line recovery and IR centre-key audio.
-- Flash/readback record: `62d29ba` (`Record geometry-derived line search firmware flash`).
+- Latest firmware source commit: `aebf230` (`Recover line locally with bounded retracing and probe rollback`), now flashed. It applies the requested `bd78b62` change on top of the current integration history, retaining the buzzer GPIO fix and IR centre-key audio.
+- Flash/readback record: `cd57a52` (`Record bounded retrace line recovery firmware flash`).
 - The formal BIN above was rebuilt from the clean integration checkout, then
   written through the STM32 ROM bootloader on USB-SERIAL CH340K COM11 at
-  57600 baud. Selective erase covered 32 firmware pages, preserved the final
-  calibration page, wrote and read back 63796 bytes with `VERIFY OK`, and
+  57600 baud. Selective erase covered 33 firmware pages, preserved the final
+  calibration page, wrote and read back 66144 bytes with `VERIFY OK`, and
   completed `GO OK: 0x08000000`.
 - Build products under `manual-build-*` are intentionally ignored by Git. A
   different computer must rebuild the named source commit rather than assume
   the artifact was transferred.
 - Current formal BIN/HEX were built in this integration checkout from
-  `dec0a27`. The preceding adaptive-search build remains under
+  `aebf230`. The preceding adaptive-search build remains under
   `manual-build-adaptive-line-search`.
   Previous isolated candidates remain under the validation directory.
-- Immediate rollback tag: `rollback/2026-09-05-before-geometry-line-search`
-  points to `ab62f3f`. The buzzer GPIO fix and earlier adaptive-search rollback
+- Immediate rollback tag: `rollback/2026-09-05-before-bounded-retrace`
+  points to `2540a82`. The buzzer GPIO fix and earlier adaptive-search rollback
   points remain available.
 
 ## Current mode map
@@ -71,44 +71,34 @@ The infrared remote also supplies the virtual mode keys and a stop command.
 
 ## Current line-loss behavior
 
-Latest user ground observation (2026-09-05): after self-flashing the previous
-turn's new firmware, the car sometimes does not move after losing the line.
-The user also rejects a fixed angular cutoff because the course has acute
-corners. This supersedes the previous assumption that their observation
-necessarily refers to the old rear-pivot image.
+Latest user ground observation before this deployment (2026-09-05): the prior
+lost-line rotation could move the chassis away from the track even when the
+right-front wheel itself rotated normally. The new recovery therefore bounds
+local motion rather than enlarging a blind angular sweep.
 
-The deployed recovery implementation changes KEY1/KEY2 recovery as follows:
+The deployed `aebf230` recovery changes KEY1/KEY2 as follows:
 
-- Search directly commands four-wheel speed feedback at equal and opposite
-  left/right targets derived from the measured chassis geometry. The default
-  120 deg/s nominal yaw converts to 2493 CPS on every wheel on the same axle
-  side. It no longer requests a position move, and
-  neither encoder travel nor an estimated chassis angle ends recovery.
-- Recent stable sensor-position hints choose the initial direction. If no
-  reliable hint exists, start a short left exploratory leg rather than
-  latching STOP. This default is a probe, not a claim about route direction.
-- With a reliable hint the geometry-scaled first leg is 1300 ms; without one
-  it is 362 ms.
-  If a leg finds no useful sensor evidence, brake, wait a 70 ms guard, reverse,
-  and double its duration up to 3466 ms. A matching outer sensor allows the
-  leg to continue past that duration while approaching the line.
-- An opposite outer-only hit confirmed for 20 ms corrects the search side via
-  the same brake/guard transition. Outer-only hits retain recovery ownership.
-  A middle hit requires 12 ms confirmation before active braking and 250 ms
-  of low-speed capture. Centred capture commands straight travel.
-- Failed captures keep the original episode watchdog. Unknown direction or a
-  completed leg no longer latches STOP. An 8-second whole-episode watchdog
-  or a DriveBase fault still stops the car; stop/reselect a mode to retry.
-- Mode reset and a zero base-speed command cancel directly owned search/brake.
-  KEY1's never-seen-line forward policy and normal on-line steering remain.
-- Commit `dec0a27` replaces the experimental front/rear 60-percent allocation
-  with symmetric front/rear targets. Its conversion uses the measured 129 mm
-  track width, 47 mm wheel diameter, 1040 counts/revolution and the existing
-  skid estimate, producing a 338 mm effective track. The timers preserve the
-  previous nominal search travel rather than imposing a turn-angle limit.
-  Normal on-line steering and capture remain unchanged. This is still a
-  wheel-speed model; encoders cannot by themselves prove ground yaw or pivot
-  position.
+- Normal tracking records a four-encoder snapshot every 20 ms while a middle
+  line sensor sees the line, retaining up to 16 reliable forward snapshots.
+  Reverse-command and wide-crossing samples are excluded from this history.
+- On line loss the car actively brakes. If the line does not return while
+  stopping, it retraces toward a recent recorded snapshot, with each wheel
+  limited to 45 mm equivalent rim travel and at most two retrace attempts.
+  With no usable history it does not invent a blind reverse move.
+- If retracing does not find the line, the car performs at most one bounded
+  probe per side at the geometry-derived 2493-CPS search target. An all-white
+  probe is limited to 28 mm or 350 ms; matching outer-sensor guidance may
+  extend it only to 56 mm or 600 ms.
+- A failed probe is actively braked and each wheel is commanded back toward
+  that probe's encoder start count before the opposite side is tried. A return
+  demand above 85 mm per wheel is rejected rather than causing a large move.
+- A middle-sensor hit brakes first and is confirmed while stationary. After a
+  valid capture, at least 500 ms of low-speed line following is used before
+  normal tracking resumes. False captures return to the bounded recovery path.
+- The whole recovery keeps an independent 8-second deadline. Two failed local
+  probes, abnormal encoder movement, DriveBase fault, or timeout stop the car
+  until the mode is selected again. Encoder return only proves wheel motion;
+  slip can prevent exact chassis-position restoration.
 
 ## Current infrared-remote audio behavior
 
@@ -131,7 +121,7 @@ The deployed recovery implementation changes KEY1/KEY2 recovery as follows:
 - The serial `b` command remains an equivalent one-shot diagnostic entry.
 - After flashing `0d31f10`, the user short-pressed the intended sound button
   and explicitly confirmed audible output (`响了`). The same fix remains in
-  deployed `dec0a27`.
+  deployed `aebf230`.
 
 ## Confirmed hardware facts
 
@@ -148,21 +138,22 @@ The deployed recovery implementation changes KEY1/KEY2 recovery as follows:
 
 | Evidence level | Current result | Scope |
 |---|---|---|
-| computer build/link | passed | integrated formal `dec0a27`; BIN is 63796 bytes; buzzer fix retained |
-| host regression | passed | default 120 deg/s / 2493 CPS and comparison 90 deg/s / 1870 CPS profiles both pass geometry conversion, symmetric wheel targets, on-line isolation, recovery, capture, watchdog, faults, reset and tick rollover; MSVC /W4 /WX |
-| flash/readback/GO | passed | COM11 at 57600 baud; 32-page selective erase; calibration page preserved; 63796-byte write and readback; `VERIFY OK`; `GO OK` |
+| computer build/link | passed | integrated formal `aebf230`; BIN is 66144 bytes; buzzer fix retained |
+| host regression | passed | 2493-CPS and 1870-CPS profiles both pass initial brake, bounded history retrace, probe rollback, opposite-side retry, stationary capture, low-speed edge follow, limits, faults, reset and tick rollover; MSVC /W4 /WX |
+| flash/readback/GO | passed | COM11 at 57600 baud; 33-page selective erase; calibration page preserved; 66144-byte write and readback; `VERIFY OK`; `GO OK` |
 | physical buzzer | passed | user explicitly confirmed `响了` after the PG12 initialization fix; fix retained in current firmware |
 | wheels off ground | not performed this turn | diagnostic image compilation is not a lifted-wheel test |
-| ground driving | current geometry-derived search firmware untested | symmetric 2493-CPS search requires same-surface comparison; do not infer chassis yaw from the build |
+| ground driving | current bounded-retrace firmware untested | local retrace, probe limits and actual chassis drift require same-surface observation |
 
 ## Open issue and next safe step
 
-The requested geometry-derived search integration, formal build, both host
-regression profiles, flash, readback verification and GO are complete.
-Physical buzzer output was confirmed on the preceding firmware and its source
-fix is retained. Ground-test lost-line search in both directions and observe
-whether the car rotates symmetrically, advances unexpectedly, or repeatedly
-misses capture. Use the immediate rollback point if it performs worse.
+The requested bounded-retrace integration, formal build, both host regression
+profiles, flash, readback verification and GO are complete. Physical buzzer
+output was confirmed on the preceding firmware and its source fix is retained.
+Ground-test loss after a straight segment and after left/right curves. Observe
+whether retracing stays near the last line position, whether a failed probe
+returns locally, and whether low-speed capture holds the line. Use the
+immediate rollback point if it performs worse.
 
 ## Update protocol
 
