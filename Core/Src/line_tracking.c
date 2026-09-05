@@ -3,11 +3,11 @@
  *
  * 传感器输出低电平表示黑线。该文件是黑线位置外环，只生成左右目标
  * CPS；DriveBase 使用四路编码器形成各轮速度内环。丢线搜索使用四轮
- * 差速速度闭环，按探头反馈换向并扩大搜索，不以固定转角判定失败。
+ * 丢线后先回溯近期见线位置，再进行失败后回退的局部试探。
  */
 
 #include "line_tracking.h"
-#include "line_search_model.h"
+#include "line_recovery.h"
 
 #include "drive_base.h"
 #include "main.h"
@@ -21,17 +21,9 @@ static uint32_t direction_candidate_since_ms;
 static uint32_t direction_last_seen_ms;
 static uint8_t direction_center_active;
 static uint32_t direction_center_since_ms;
-static uint8_t recovery_episode_active;
-static uint32_t recovery_episode_started_ms;
-static uint32_t recovery_leg_started_ms;
-static uint32_t recovery_leg_duration_ms;
-static int8_t recovery_outer_candidate;
-static uint32_t recovery_outer_since_ms;
 static int8_t recovery_turn_direction;
 static int8_t outer_turn_direction;
 static uint32_t outer_turn_started_ms;
-static uint8_t recovery_center_candidate;
-static uint32_t recovery_center_since_ms;
 static uint8_t smooth_mode_enabled;
 static uint8_t smooth_filter_valid;
 static int16_t smooth_error_q8;
@@ -46,33 +38,24 @@ static uint16_t smooth_turn_gain_percent = 100U;
 typedef enum
 {
   LINE_RECOVERY_NORMAL = 0U,
-  LINE_RECOVERY_WAIT_SEARCH,
-  LINE_RECOVERY_TURN_SEARCH,
-  LINE_RECOVERY_BRAKE_CAPTURE,
-  LINE_RECOVERY_BRAKE_REVERSE,
-  LINE_RECOVERY_STOPPED,
-  LINE_RECOVERY_WAIT_FORWARD,
-  LINE_RECOVERY_SETTLE
+  LINE_RECOVERY_ACTIVE,
+  LINE_RECOVERY_SETTLE,
+  LINE_RECOVERY_STOPPED
 } LineRecoveryState;
 
 static LineRecoveryState recovery_state;
 static uint32_t recovery_state_started_ms;
+static uint8_t settle_center_valid;
+static uint32_t settle_center_since;
 
-#define TRACKING_DIRECTION_GUARD_MS          70U
-#define TRACKING_SEARCH_FIRST_LEG_MS LINE_SEARCH_LEG_MS(900U)
-#define TRACKING_SEARCH_PROBE_LEG_MS LINE_SEARCH_LEG_MS(250U)
-#define TRACKING_SEARCH_MAX_LEG_MS   LINE_SEARCH_LEG_MS(2400U)
-#define TRACKING_SEARCH_TURN_CPS LINE_SEARCH_TARGET_CPS
-#define TRACKING_SEARCH_TIMEOUT_MS           8000U
 #define TRACKING_HINT_CONFIRM_MS               20U
 #define TRACKING_HINT_MAX_AGE_MS              200U
 #define TRACKING_HINT_CENTER_CLEAR_MS          80U
-#define TRACKING_SEARCH_CENTER_CONFIRM_MS      12U
-#define TRACKING_REACQUIRE_SETTLE_MS         250U
+#define TRACKING_REACQUIRE_SETTLE_MS         500U
 #define TRACKING_MIN_INNER_PWM             2200
 #define TRACKING_MIN_OUTER_PWM             3000
 #define TRACKING_SETTLE_INNER_PWM           2200
-#define TRACKING_SETTLE_OUTER_PWM           2700
+#define TRACKING_SETTLE_OUTER_PWM           2400
 #define TRACKING_SETTLE_CENTER_PWM          2200
 #define TRACKING_NORMAL_CENTER_PWM          3000
 #define TRACKING_OUTER_ROLL_IN_MS            120U
@@ -170,16 +153,6 @@ static uint8_t read_black(GPIO_TypeDef *port, uint16_t pin)
   return HAL_GPIO_ReadPin(port, pin) == GPIO_PIN_RESET ? 1U : 0U;
 }
 
-static void command_search_wheels(void)
-{
-  int32_t front = recovery_turn_direction < 0
-                ? -TRACKING_SEARCH_TURN_CPS : TRACKING_SEARCH_TURN_CPS;
-  /* Rigid-body longitudinal projection u_i = vx - yaw_rate*y_i: front and
-     rear on the same side have equal demand. Unequal axle targets require
-     extra longitudinal slip; they do not prescribe a rearward ICR. */
-  DriveBase_SetWheelCps(front, front, -front, -front);
-}
-
 /* Observe sensor position, never the filtered motor correction. A newly
    opposing observation invalidates the old hint while it is being confirmed. */
 static void update_direction_hint(const LineTrackingReading *reading,
@@ -228,25 +201,6 @@ static void update_direction_hint(const LineTrackingReading *reading,
   }
 }
 
-/* A leg timeout means try the other side, not a failed corner. A matching
-   outer sensor can keep the current sweep alive until a middle sensor arrives.
-   The episode watchdog remains independent of all leg/capture restarts. */
-static void reverse_search(uint32_t now)
-{
-  DriveBase_Stop(DRIVE_STOP_BRAKE);
-  recovery_turn_direction = (int8_t)-recovery_turn_direction;
-  if (recovery_leg_duration_ms < TRACKING_SEARCH_MAX_LEG_MS)
-  {
-    recovery_leg_duration_ms *= 2U;
-    if (recovery_leg_duration_ms > TRACKING_SEARCH_MAX_LEG_MS)
-      recovery_leg_duration_ms = TRACKING_SEARCH_MAX_LEG_MS;
-  }
-  recovery_outer_candidate = 0;
-  recovery_center_candidate = 0U;
-  recovery_state = LINE_RECOVERY_BRAKE_REVERSE;
-  recovery_state_started_ms = now;
-}
-
 void line_tracking_init(void)
 {
   GPIO_InitTypeDef gpio = {0};
@@ -269,10 +223,9 @@ void line_tracking_init(void)
 
 void line_tracking_reset(void)
 {
-  if (recovery_episode_active != 0U)
-  {
-    DriveBase_Stop(DRIVE_STOP_COAST);
-  }
+  LineRecovery_Reset();
+  settle_center_valid = 0U;
+  settle_center_since = HAL_GetTick();
   line_has_been_seen = 0U;
   predicted_turn_direction = 0;
   direction_candidate = 0;
@@ -280,17 +233,9 @@ void line_tracking_reset(void)
   direction_candidate_since_ms = HAL_GetTick();
   direction_last_seen_ms = HAL_GetTick();
   direction_center_since_ms = HAL_GetTick();
-  recovery_episode_active = 0U;
-  recovery_episode_started_ms = HAL_GetTick();
-  recovery_leg_started_ms = HAL_GetTick();
-  recovery_leg_duration_ms = TRACKING_SEARCH_PROBE_LEG_MS;
-  recovery_outer_candidate = 0;
-  recovery_outer_since_ms = HAL_GetTick();
   recovery_turn_direction = 0;
   outer_turn_direction = 0;
   outer_turn_started_ms = HAL_GetTick();
-  recovery_center_candidate = 0U;
-  recovery_center_since_ms = HAL_GetTick();
   smooth_filter_valid = 0U;
   smooth_error_q8 = 0;
   smooth_previous_error_q8 = 0;
@@ -384,270 +329,105 @@ LineTrackingAction line_tracking_compute(const LineTrackingReading *reading,
   if (recovery_state == LINE_RECOVERY_NORMAL)
   {
     update_direction_hint(reading, active_count, now);
+    LineRecovery_Record(reading, now);
   }
-
-  if (recovery_episode_active != 0U &&
-      (DriveBase_GetFaultMask() != 0U ||
-       now - recovery_episode_started_ms >= TRACKING_SEARCH_TIMEOUT_MS))
+  if (recovery_state != LINE_RECOVERY_NORMAL && LineRecovery_Expired(now))
   {
-    DriveBase_Stop(DRIVE_STOP_COAST);
+    LineRecovery_Reset();
     recovery_state = LINE_RECOVERY_STOPPED;
-    command_stop(command);
-    return LINE_ACTION_STOP;
   }
-
-  /* Search owns DriveBase, using the same four-wheel speed feedback as normal
-     tracking. No position target or chassis-angle estimate ends a corner. */
-  if (recovery_state == LINE_RECOVERY_TURN_SEARCH)
+  if (recovery_state == LINE_RECOVERY_ACTIVE)
   {
-    int8_t outer_side = reading->x2_black && !reading->x4_black ? -1 :
-                       (reading->x4_black && !reading->x2_black ? 1 : 0);
-    LineTrackingAction search_action = recovery_turn_direction < 0
-                                     ? LINE_ACTION_SEARCH_LEFT
-                                     : LINE_ACTION_SEARCH_RIGHT;
-    command_release_to_drive(command, search_action);
-    DriveBase_Task(now);
-    if (DriveBase_GetFaultMask() != 0U)
+    LineRecoveryResult result = LineRecovery_Step(reading, command, now);
+    if (result == LINE_RECOVERY_CAPTURED)
     {
-      DriveBase_Stop(DRIVE_STOP_COAST);
-      recovery_state = LINE_RECOVERY_STOPPED;
-      command_stop(command);
-      return LINE_ACTION_STOP;
-    }
-
-    if (center_visible != 0U)
-    {
-      recovery_outer_candidate = 0;
-      if (recovery_center_candidate == 0U)
-      {
-        recovery_center_candidate = 1U;
-        recovery_center_since_ms = now;
-      }
-      else if (now - recovery_center_since_ms >=
-               TRACKING_SEARCH_CENTER_CONFIRM_MS)
-      {
-        DriveBase_Stop(DRIVE_STOP_BRAKE);
-        recovery_center_candidate = 0U;
-        recovery_state = LINE_RECOVERY_BRAKE_CAPTURE;
-        recovery_state_started_ms = now;
-        return search_action;
-      }
-    }
-    else
-    {
-      recovery_center_candidate = 0U;
-      if (outer_side != 0 && outer_side != recovery_turn_direction)
-      {
-        if (recovery_outer_candidate != outer_side)
-        {
-          recovery_outer_candidate = outer_side;
-          recovery_outer_since_ms = now;
-        }
-        else if (now - recovery_outer_since_ms >= TRACKING_HINT_CONFIRM_MS)
-        {
-          reverse_search(now);
-          return search_action;
-        }
-      }
-      else
-      {
-        recovery_outer_candidate = 0;
-      }
-      /* A line on the side we are approaching is useful evidence even beyond
-         the nominal leg duration. All-white or ambiguous outer hits are not. */
-      if (now - recovery_leg_started_ms >= recovery_leg_duration_ms &&
-          outer_side != recovery_turn_direction)
-      {
-        reverse_search(now);
-        return search_action;
-      }
-    }
-
-    command_search_wheels();
-    return search_action;
-  }
-
-  if (recovery_state == LINE_RECOVERY_BRAKE_CAPTURE ||
-      recovery_state == LINE_RECOVERY_BRAKE_REVERSE)
-  {
-    DriveBaseTelemetry drive_telemetry;
-    uint8_t reversing = recovery_state == LINE_RECOVERY_BRAKE_REVERSE;
-    LineTrackingAction search_action = recovery_turn_direction < 0
-                                     ? LINE_ACTION_SEARCH_LEFT
-                                     : LINE_ACTION_SEARCH_RIGHT;
-    command_release_to_drive(command, search_action);
-    DriveBase_Task(now);
-    DriveBase_GetTelemetry(&drive_telemetry);
-    if (drive_telemetry.fault_mask != 0U)
-    {
-      DriveBase_Stop(DRIVE_STOP_COAST);
-      recovery_state = LINE_RECOVERY_STOPPED;
-      command_stop(command);
-      return LINE_ACTION_STOP;
-    }
-    if (drive_telemetry.mode == DRIVE_BASE_BRAKING)
-      return search_action;
-
-    command_stop(command);
-    recovery_state = (reversing == 0U && center_visible != 0U)
-                   ? LINE_RECOVERY_SETTLE : LINE_RECOVERY_WAIT_SEARCH;
-    recovery_state_started_ms = now;
-    recovery_center_candidate = 0U;
-    return LINE_ACTION_STOP;
-  }
-
-  if (recovery_state == LINE_RECOVERY_WAIT_SEARCH)
-  {
-    command_stop(command);
-    if (center_visible != 0U)
-    {
-      if (recovery_center_candidate == 0U)
-      {
-        recovery_center_candidate = 1U;
-        recovery_center_since_ms = now;
-      }
-      else if (now - recovery_center_since_ms >=
-               TRACKING_SEARCH_CENTER_CONFIRM_MS)
-      {
-        recovery_state = LINE_RECOVERY_SETTLE;
-        recovery_state_started_ms = now;
-        recovery_center_candidate = 0U;
-      }
-      return LINE_ACTION_STOP;
-    }
-    recovery_center_candidate = 0U;
-    if (now - recovery_state_started_ms >= TRACKING_DIRECTION_GUARD_MS)
-    {
-      recovery_outer_candidate = 0;
-      recovery_state = LINE_RECOVERY_TURN_SEARCH;
-      recovery_leg_started_ms = now;
+      recovery_state = LINE_RECOVERY_SETTLE;
       recovery_state_started_ms = now;
-      command_release_to_drive(command,
-          recovery_turn_direction < 0 ? LINE_ACTION_SEARCH_LEFT
-                                      : LINE_ACTION_SEARCH_RIGHT);
-      command_search_wheels();
-      return command->action;
+      settle_center_valid = 0U;
+      command_stop(command);
     }
-    return LINE_ACTION_STOP;
+    else if (result == LINE_RECOVERY_FAILED)
+    {
+      recovery_state = LINE_RECOVERY_STOPPED;
+      command_stop(command);
+    }
+    return command->action;
   }
-
-  /* During the stationary guard and low-speed settle, an outer-only hit is
-     still not a captured line. Re-enter the same-direction search without
-     allowing the old forward/arc command to produce a one-step lurch. */
-  if ((recovery_state == LINE_RECOVERY_WAIT_FORWARD ||
-       recovery_state == LINE_RECOVERY_SETTLE) &&
-      center_visible == 0U)
-  {
-    command_stop(command);
-    recovery_center_candidate = 0U;
-    recovery_state = LINE_RECOVERY_WAIT_SEARCH;
-    recovery_state_started_ms = now;
-    return LINE_ACTION_STOP;
-  }
-
   if (recovery_state == LINE_RECOVERY_STOPPED)
   {
     command_stop(command);
-    /* Only a drive fault or the whole-episode watchdog requires mode reset. */
     return LINE_ACTION_STOP;
   }
-
   if (active_count == 0U)
   {
     outer_turn_direction = 0;
     smooth_filter_valid = 0U;
     smooth_centered_active = 0U;
     smooth_straight_pwm = TRACKING_SMOOTH_STRAIGHT_BASE_PWM;
-    /* KEY1 上电后从未见过黑线时仍按无黑线方案前进；一旦已经进入
-       寻线，或处于 KEY2 纯寻线模式，全白就按预测方向原地搜线。 */
     if (no_line_forward_enabled != 0U && line_has_been_seen == 0U)
     {
-      recovery_state = LINE_RECOVERY_NORMAL;
-      command_set_pwm(command, base_speed, base_speed,
-                      LINE_ACTION_FORWARD);
+      command_set_pwm(command, base_speed, base_speed, LINE_ACTION_FORWARD);
       return LINE_ACTION_FORWARD;
     }
-
-    if (recovery_state == LINE_RECOVERY_NORMAL ||
-        recovery_state == LINE_RECOVERY_WAIT_FORWARD ||
-        recovery_state == LINE_RECOVERY_SETTLE)
+    if (recovery_state == LINE_RECOVERY_NORMAL)
     {
-      command_stop(command);
       recovery_turn_direction = predicted_turn_direction;
       if (now - direction_last_seen_ms > TRACKING_HINT_MAX_AGE_MS)
         recovery_turn_direction = 0;
-      recovery_episode_active = 1U;
-      recovery_episode_started_ms = now;
-      recovery_leg_duration_ms = recovery_turn_direction != 0
-                               ? TRACKING_SEARCH_FIRST_LEG_MS
-                               : TRACKING_SEARCH_PROBE_LEG_MS;
-      /* No hint is uncertainty, not a stop condition. Start a short left
-         probe, then alternate increasingly long legs if no sensor responds. */
-      if (recovery_turn_direction == 0) recovery_turn_direction = -1;
-      recovery_state = LINE_RECOVERY_WAIT_SEARCH;
-      recovery_center_candidate = 0U;
-      recovery_state_started_ms = now;
-      return LINE_ACTION_STOP;
     }
-
-    if (recovery_state == LINE_RECOVERY_STOPPED)
-    {
-      command_stop(command);
-      return LINE_ACTION_STOP;
-    }
-
-    command_stop(command);
+    LineRecovery_Begin(recovery_turn_direction, now);
+    recovery_state = LINE_RECOVERY_ACTIVE;
+    /* Begin applied active braking; the caller must not overwrite it with
+       the generic zero-speed coast command during this handoff. */
+    command_release_to_drive(command, LINE_ACTION_STOP);
     return LINE_ACTION_STOP;
   }
-
-  if (recovery_state == LINE_RECOVERY_WAIT_FORWARD)
+  if (recovery_state == LINE_RECOVERY_SETTLE)
   {
-    command_stop(command);
-    if (now - recovery_state_started_ms < TRACKING_DIRECTION_GUARD_MS)
+    if (center_visible && !(reading->x2_black && reading->x4_black))
     {
-      return LINE_ACTION_STOP;
+      if (!settle_center_valid) { settle_center_valid = 1U; settle_center_since = now; }
     }
-    recovery_state = LINE_RECOVERY_SETTLE;
-    recovery_state_started_ms = now;
-    settling = 1U;
-  }
-  else if (recovery_state == LINE_RECOVERY_SETTLE)
-  {
-    if (now - recovery_state_started_ms < TRACKING_REACQUIRE_SETTLE_MS)
+    else settle_center_valid = 0U;
+    if (now - recovery_state_started_ms >= TRACKING_REACQUIRE_SETTLE_MS &&
+        settle_center_valid && now - settle_center_since >= TRACKING_HINT_CENTER_CLEAR_MS)
     {
-      settling = 1U;
-    }
-    else
-    {
+      LineRecovery_Commit();
       recovery_state = LINE_RECOVERY_NORMAL;
-      predicted_turn_direction = 0;
-      recovery_turn_direction = 0;
-      direction_candidate = 0;
+      predicted_turn_direction = recovery_turn_direction = direction_candidate = 0;
       direction_center_active = 0U;
-      recovery_episode_active = 0U;
     }
+    else settling = 1U;
+  }
+  if (settling)
+  {
+    /* Keep the newly found edge under slow forward steering; an outer-only
+       hit here is guidance, not permission to restart high-power spinning. */
+    weighted_sum = (int16_t)(-3 * reading->x2_black - reading->x1_black +
+                             reading->x3_black + 3 * reading->x4_black);
+    if (reading->x2_black && reading->x4_black)
+      command_set_pwm(command, TRACKING_SETTLE_CENTER_PWM, TRACKING_SETTLE_CENTER_PWM,
+                      LINE_ACTION_CROSSING);
+    else if (weighted_sum < 0)
+      command_set_pwm(command, TRACKING_SETTLE_INNER_PWM, TRACKING_SETTLE_OUTER_PWM,
+                      LINE_ACTION_LEFT_ADJUST);
+    else if (weighted_sum > 0)
+      command_set_pwm(command, TRACKING_SETTLE_OUTER_PWM, TRACKING_SETTLE_INNER_PWM,
+                      LINE_ACTION_RIGHT_ADJUST);
+    else
+      command_set_pwm(command, TRACKING_SETTLE_CENTER_PWM, TRACKING_SETTLE_CENTER_PWM,
+                      LINE_ACTION_FORWARD);
+    return command->action;
   }
 
-  if (settling != 0U)
-  {
-    /* 重新捕线后的 250 ms 内限制速度，转向仅按当前探头位置。 */
-    turn_inner_speed = TRACKING_SETTLE_INNER_PWM;
-    turn_outer_speed = TRACKING_SETTLE_OUTER_PWM;
-    center_speed = TRACKING_SETTLE_CENTER_PWM;
-    crossing_speed = TRACKING_SETTLE_CENTER_PWM;
-  }
-  else
-  {
-    /* Stable profile shared by KEY1 and KEY2. */
-    turn_inner_speed = ensure_minimum_speed(
-        scale_speed(base_speed, 55U), TRACKING_MIN_INNER_PWM);
-    turn_outer_speed = ensure_minimum_speed(
-        scale_speed(base_speed, 90U), TRACKING_MIN_OUTER_PWM);
-    turn_outer_speed = turn_speed_for_gain(turn_outer_speed);
-    center_speed = base_speed > TRACKING_NORMAL_CENTER_PWM
-                 ? TRACKING_NORMAL_CENTER_PWM : base_speed;
-    crossing_speed = center_speed;
-  }
+  turn_inner_speed = ensure_minimum_speed(
+      scale_speed(base_speed, 55U), TRACKING_MIN_INNER_PWM);
+  turn_outer_speed = ensure_minimum_speed(
+      scale_speed(base_speed, 90U), TRACKING_MIN_OUTER_PWM);
+  turn_outer_speed = turn_speed_for_gain(turn_outer_speed);
+  center_speed = base_speed > TRACKING_NORMAL_CENTER_PWM
+               ? TRACKING_NORMAL_CENTER_PWM : base_speed;
+  crossing_speed = center_speed;
 
   /* 两个外侧探头同时压线或四路全黑，通常是宽线/交叉口。 */
   if ((reading->x2_black && reading->x4_black) || active_count == 4U)
