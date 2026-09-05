@@ -169,6 +169,18 @@ static uint8_t read_black(GPIO_TypeDef *port, uint16_t pin)
   return HAL_GPIO_ReadPin(port, pin) == GPIO_PIN_RESET ? 1U : 0U;
 }
 
+static void command_search_wheels(void)
+{
+  int32_t front = recovery_turn_direction < 0
+                ? -TRACKING_SEARCH_TURN_CPS : TRACKING_SEARCH_TURN_CPS;
+  int32_t rear = (front * (int32_t)LINE_TRACKING_SEARCH_REAR_PERCENT) / 100L;
+
+  /* M1/M2 left front/rear; M3/M4 right front/rear. Retain zero mean
+     longitudinal target on each axle and mirror both left/right searches.
+     Actual fore/aft ICR still depends on tyre slip and normal loads. */
+  DriveBase_SetWheelCps(front, rear, -front, -rear);
+}
+
 /* Observe sensor position, never the filtered motor correction. A newly
    opposing observation invalidates the old hint while it is being confirmed. */
 static void update_direction_hint(const LineTrackingReading *reading,
@@ -452,10 +464,7 @@ LineTrackingAction line_tracking_compute(const LineTrackingReading *reading,
       }
     }
 
-    DriveBase_SetSideCps(recovery_turn_direction < 0
-                        ? -TRACKING_SEARCH_TURN_CPS : TRACKING_SEARCH_TURN_CPS,
-                        recovery_turn_direction < 0
-                        ? TRACKING_SEARCH_TURN_CPS : -TRACKING_SEARCH_TURN_CPS);
+    command_search_wheels();
     return search_action;
   }
 
@@ -517,10 +526,7 @@ LineTrackingAction line_tracking_compute(const LineTrackingReading *reading,
       command_release_to_drive(command,
           recovery_turn_direction < 0 ? LINE_ACTION_SEARCH_LEFT
                                       : LINE_ACTION_SEARCH_RIGHT);
-      DriveBase_SetSideCps(recovery_turn_direction < 0
-                          ? -TRACKING_SEARCH_TURN_CPS : TRACKING_SEARCH_TURN_CPS,
-                          recovery_turn_direction < 0
-                          ? TRACKING_SEARCH_TURN_CPS : -TRACKING_SEARCH_TURN_CPS);
+      command_search_wheels();
       return command->action;
     }
     return LINE_ACTION_STOP;

@@ -43,15 +43,21 @@ void DriveBase_Stop(DriveStopMode mode)
   else telemetry.mode = DRIVE_BASE_STOPPED;
   memset(telemetry.requested_cps, 0, sizeof telemetry.requested_cps);
 }
-void DriveBase_SetSideCps(int32_t left, int32_t right)
+void DriveBase_SetWheelCps(int32_t m1, int32_t m2, int32_t m3, int32_t m4)
 {
   /* A new speed command during active braking would violate ownership even
      though the production DriveBase rejects it. Make that visible here. */
   assert(telemetry.mode != DRIVE_BASE_BRAKING && telemetry.fault_mask == 0);
   ++speed_commands;
   telemetry.mode = DRIVE_BASE_SPEED;
-  telemetry.requested_cps[0] = telemetry.requested_cps[1] = left;
-  telemetry.requested_cps[2] = telemetry.requested_cps[3] = right;
+  telemetry.requested_cps[0] = m1;
+  telemetry.requested_cps[1] = m2;
+  telemetry.requested_cps[2] = m3;
+  telemetry.requested_cps[3] = m4;
+}
+void DriveBase_SetSideCps(int32_t left, int32_t right)
+{
+  DriveBase_SetWheelCps(left, left, right, right);
 }
 static LineTrackingAction sample(unsigned mask, uint32_t dt)
 {
@@ -81,12 +87,20 @@ static void reset(uint8_t forward, uint8_t smooth)
 static void hint(unsigned mask) { sample(mask, 1); sample(mask, 25); }
 static void assert_search(int side)
 {
+  int32_t rear_magnitude = 3600L *
+                          (int32_t)LINE_TRACKING_SEARCH_REAR_PERCENT / 100L;
   assert(!output.valid && telemetry.mode == DRIVE_BASE_SPEED);
   assert(output.action == (side < 0 ? LINE_ACTION_SEARCH_LEFT :
                                       LINE_ACTION_SEARCH_RIGHT));
-  assert(telemetry.requested_cps[0] == telemetry.requested_cps[1]);
-  assert(telemetry.requested_cps[2] == telemetry.requested_cps[3]);
+  assert(telemetry.requested_cps[1] ==
+         (side < 0 ? -rear_magnitude : rear_magnitude));
+  assert(telemetry.requested_cps[3] ==
+         (side < 0 ? rear_magnitude : -rear_magnitude));
   assert(telemetry.requested_cps[0] == -telemetry.requested_cps[2]);
+  assert(telemetry.requested_cps[1] == -telemetry.requested_cps[3]);
+  assert(telemetry.requested_cps[0] == (side < 0 ? -3600 : 3600));
+  assert(side < 0 ? telemetry.requested_cps[1] <= -1800 :
+                   telemetry.requested_cps[1] >= 1800);
   assert(side < 0 ? telemetry.requested_cps[0] < 0 :
                    telemetry.requested_cps[0] > 0);
 }
@@ -115,6 +129,8 @@ static void capture(void)
   sample(5, 22); sample(5, 1);
   assert(output.valid && output.left_cps > 0 &&
          output.left_cps == output.right_cps);
+  assert(telemetry.requested_cps[0] == telemetry.requested_cps[1]);
+  assert(telemetry.requested_cps[2] == telemetry.requested_cps[3]);
 }
 int main(void)
 {
@@ -123,6 +139,15 @@ int main(void)
   for (forward = 0; forward <= 1; ++forward)
   {
     /* Most recent stable side wins over earlier departure history. */
+    reset((uint8_t)forward, (uint8_t)smooth);
+    sample(5, 1);
+    assert(telemetry.requested_cps[0] == telemetry.requested_cps[1]);
+    assert(telemetry.requested_cps[2] == telemetry.requested_cps[3]);
+    /* On-line sharp turns still use the original equal-axle commands. */
+    sample(2, 1); sample(2, 130);
+    assert(output.valid && output.action == LINE_ACTION_LEFT_SHARP);
+    assert(telemetry.requested_cps[0] == telemetry.requested_cps[1]);
+    assert(telemetry.requested_cps[2] == telemetry.requested_cps[3]);
     reset((uint8_t)forward, (uint8_t)smooth);
     sample(5, 1); hint(1); hint(8); start_search(1);
     reset((uint8_t)forward, (uint8_t)smooth);
@@ -194,6 +219,7 @@ int main(void)
   reset(0, 1); start_search(-1);
   tick = UINT32_MAX - 15;
   reset(0, 1); hint(1); start_search(-1);
-  puts("PASS: fresh/unknown direction, widening reversals, sensor correction, acute-turn continuation, capture/brake ownership, watchdog, faults, mode reset, tick rollover");
+  printf("PASS rear=%u: axle targets, on-line isolation, fresh/unknown direction, widening reversals, sensor correction, acute-turn continuation, capture/brake ownership, watchdog, faults, mode reset, tick rollover\n",
+         (unsigned)LINE_TRACKING_SEARCH_REAR_PERCENT);
   return 0;
 }
