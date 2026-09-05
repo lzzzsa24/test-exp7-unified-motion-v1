@@ -1,200 +1,151 @@
 # Shared project state
 
-This is the handoff record for humans, Codex tasks, and delegated models. It is
-not a substitute for Git: the checker resolves the live branch and HEAD every
-time. Only the integration coordinator updates this file after a merge, flash,
-or physical test.
+This checkout now contains the independent simple four-sensor candidate.
+Source state is live Git. Deployment facts below are explicitly separate from
+this unflashed candidate; they were refreshed from the other integration
+worktree's committed record during this task.
 
 ## Machine-readable snapshot
 
 ```text
 state_schema_version: 1
 state_updated_at: 2026-09-05
-integration_branch: feature/line-reacquire-lock
-repository_head_at_update: c018174
-latest_code_commit: 1bf6fe6
-flashed_source_commit: 1bf6fe6
-flash_record_commit: c018174
-deployed_tag: deployed/2026-09-05-continuous-recovery
-formal_bin_path: manual-build-unified-motion/exp7_unified_motion.bin
-formal_hex_path: manual-build-unified-motion/exp7_unified_motion.hex
-formal_bin_size_bytes: 67800
-flashed_bin_sha256: 9A7D5A54585CD6093E65630BE5F5E835B53AEEDDAAF46E3CCCAB13C11E580789
-flashed_hex_sha256: BD157BEF956446E1633C6FE445CF5C5CB78982FA6017B6CA29AB3ADE89FCCC27
-ground_test_status: continuous_recovery_flashed_ground_test_pending_buzzer_passed
+integration_branch: feature/simple-four-line
+repository_head_at_update: 6f6f014
+latest_code_commit: 6f6f014
+flashed_source_commit: 8c4af2b
+flash_record_commit: 6c528d8
+deployed_tag: deployed/2026-09-05-confirmed-line-resume
+formal_bin_path: manual-build-simple-line/simple_four_line.bin
+formal_hex_path: manual-build-simple-line/simple_four_line.hex
+formal_bin_size_bytes: 68172
+flashed_bin_sha256: BE3C5461CAB290E6DD65EF1A5D50F839289DB592880F200034CB1CDFCD654F0D
+flashed_hex_sha256: 4E6D00F7A8CD3A9A11F13B88259E9C0C87A6033A8330E26AB3EE9E8C711BB27D
+ground_test_status: simple_four_line_unflashed_and_untested
 k210_status: removed
-candidate_source_commit: 1bf6fe6
-candidate_bin_size_bytes: 67800
-candidate_bin_sha256: 9A7D5A54585CD6093E65630BE5F5E835B53AEEDDAAF46E3CCCAB13C11E580789
-candidate_hex_sha256: BD157BEF956446E1633C6FE445CF5C5CB78982FA6017B6CA29AB3ADE89FCCC27
-user_reported_flash: tool_verified_current_candidate
+candidate_source_commit: 6f6f014
+candidate_bin_size_bytes: 10048
+candidate_bin_sha256: 8720FB0CE906FC4AF3BC7B97E05F64712DE9368495DC7A7DA99F2B498F0177BF
+candidate_hex_sha256: EDD564E8033E133787AD543869097DC438A6D15E2C4D698E063F1186678B52F9
+user_reported_flash: no_new_simple_line_flash
 ```
 
-`repository_head_at_update` is the source/history anchor present when this
-snapshot was written. Documentation-only governance commits may be newer; the
-checker requires the anchor to remain an ancestor and prints the live HEAD.
+The schema-1 checker uses `formal_bin_size_bytes` as the last flashed
+snapshot size, despite the field's legacy name. The active build paths now
+point to the new candidate, whose size is `candidate_bin_size_bytes`.
+Do not infer deployment from a matching candidate file. The repository anchor
+and candidate identify source commit `6f6f014`; state-only commits may follow.
 
-## Active project and deployed firmware
+## Active candidate
 
-- Repository: `F:\myproject\jidian\project\test-exp7-unified-motion-v1`
-- Integration branch: `feature/line-reacquire-lock`
-- Latest firmware source commit: `1bf6fe6` (`Recover lines with continuous group motion and coarse returns`), now flashed. It applies the requested `ad0a3ee` change on top of the current integration history, retaining per-wheel line-turn assistance, the position handoff fix, buzzer GPIO fix and IR centre-key audio.
-- Flash/readback record: `c018174` (`Record continuous grouped line recovery firmware flash`).
-- The formal BIN above was rebuilt from the clean integration checkout, then
-  written through the STM32 ROM bootloader on USB-SERIAL CH340K COM11 at
-  57600 baud. Selective erase covered 34 firmware pages, preserved the final
-  calibration page, wrote and read back 67800 bytes with `VERIFY OK`, and
-  completed `GO OK: 0x08000000`.
-- Build products under `manual-build-*` are intentionally ignored by Git. A
-  different computer must rebuild the named source commit rather than assume
-  the artifact was transferred.
-- Current formal BIN/HEX were built in this integration checkout from
-  `1bf6fe6`. The preceding adaptive-search build remains under
-  `manual-build-adaptive-line-search`.
-  Previous isolated candidates remain under the validation directory.
-- Immediate rollback tag: `rollback/2026-09-05-before-continuous-recovery`
-  points to `307a2b7`. The buzzer GPIO fix and earlier adaptive-search rollback
-  points remain available.
+- Checkout: `F:myprojectjidianproject	est-exp7-unified-motion-v1`.
+- Branch: `feature/simple-four-line`, created from `d2efe0e` at the user's request.
+- Immutable starting-point tag: `rollback/2026-09-05-before-simple-four-line` -> `d2efe0e`.
+- Source: `6f6f014` (`Implement standalone four-sensor line follower`).
+- The application was written afresh in `SimpleLine`. Historical projects
+  supplied hardware facts, interface mappings and measured motor calibration
+  points, not the old driving/recovery state machines.
+- The rewritten `Core/Src/motorPWM.c` retains the exact wheel order,
+  forward/reverse polarity, TIM mapping and measured calibration points.
+  It adds a 10 ms zero-output interval before reversing an energized side.
+- The build explicitly selects the new application plus MCU/HAL/runtime
+  support. No old DriveBase, recovery, encoder, obstacle or vision controller
+  appears in the ELF. CubeIDE Debug/Release selections are synchronized.
+- `build_unified_motion.ps1` is the standard entrypoint and delegates to
+  `build_simple_line.ps1`. The linker reserves 0x0807F800..0x0807FFFF.
+- Build products remain ignored by Git. Rebuild the named source commit on
+  another machine. No remote push, serial-port access or flash was performed
+  by this task.
 
-## Current mode map
+## Candidate behavior and controls
 
-| Input | Mode | Motor owner |
+All definitions in this section apply after the simple candidate is flashed,
+not to the currently recorded integrated firmware.
+
+| Input | Action |
+|---|---|
+| power-on / reset | STOP; start keys held at boot require release |
+| physical KEY1 or KEY2; remote/serial 1 or 2 | start the single line-following mode |
+| physical KEY3; remote/serial 0 or 3 | STOP; physical KEY3 wins while held |
+| serial s / S / space | STOP |
+| serial ? | request current raw/filtered sensors and applied logical PWM |
+
+- Sensor order left-to-right is X2/PF14, X1/PF13, X3/PF15, X4/PG0.
+  Black is electrically low and displayed as 1.
+- Every 5 ms, two identical samples accept a new mask. Centre readings drive
+  straight or apply a two-level differential correction. Outer-only or the
+  two same-side readings counter-rotate the sides.
+- White after a recent turn continues that direction. Without a recent
+  direction, moving over a short gap is limited to 60 ms. Starting on all
+  white leaves the motors stopped.
+- Sharp turns and searches share a 900 ms deadline. Only 30 ms of centre
+  evidence clears it; transient centre hits and repeated START cannot renew it.
+- Wide/junction/disjoint masks travel straight slowly for at most 300 ms.
+  Continuous unstable input for 50 ms, a control-loop gap above 50 ms,
+  or exhausted recovery causes a latched STOP requiring explicit restart.
+- An independent watchdog is fed only after each completed control cycle.
+  Its nominal interval is 200 ms at 40 kHz LSI; physical timing is unmeasured.
+- USART1 RX/TX use interrupts; busy telemetry is dropped. Raw sensors also
+  drive four RGB components. LED1 indicates running; LED2 indicates automatic
+  fault stop. Status changes chirp the active buzzer briefly.
+- This application does not sample encoders, battery, obstacles or K210, and
+  does not refresh OLED. PWM zero is coasting rather than mechanical braking.
+  It supplies no wheel-stall or low-battery protection.
+
+## Latest recorded deployment, from the other task
+
+During this task, `feature/line-reacquire-lock` independently advanced in
+`F:myprojectjidianworktreesline-reacquire-integration`. Its state at
+`7a79682` records source `8c4af2b` as flashed, with record `6c528d8`
+and tag `deployed/2026-09-05-confirmed-line-resume`.
+That record says COM11, 57600 baud, 34 selectively erased firmware pages,
+calibration page retained, 68172-byte write/readback, VERIFY OK and GO OK.
+
+These are imported committed deployment facts, not a flash performed or a
+physical test witnessed by this simple-line task. The source changes from
+that other branch were not merged here. If that branch advances again,
+refresh its deployment record before the next hardware operation.
+
+Its integrated KEY3/3 still selects the encoder figure eight. Do not apply the
+candidate's new KEY3 STOP meaning until the candidate is actually deployed.
+
+## Hardware facts
+
+- Board: YB-DSF01-V1.1 / STM32F103ZETx, 8 MHz HSE / 72 MHz system clock.
+- M1 left-front and M2 left-rear use TIM8 PC6/7/8/9; M3 right-front and M4
+  right-rear use fully remapped TIM1 PE9/11/13/14. PWM is 20 kHz, ARR 3599.
+- The four AB encoders are recorded repaired. M2 is PA15/PB3; the old single-edge
+  fallback is obsolete. They are not used by this candidate.
+- K210 is recorded physically removed. The OLED is the separate J12 device.
+- Historical PWM calibration was wheels-off-ground evidence, not loaded
+  vehicle speed or yaw evidence. No new physical observations were supplied.
+- Full mapping and evidence sources: `SimpleLine/HARDWARE.md`.
+
+## Evidence ledger for the simple candidate
+
+| Evidence | Result | Scope |
 |---|---|---|
-| power-on / stop command | STOP | stop latch |
-| KEY1 / `1` | integrated black-line tracking plus infrared/ultrasonic bypass | line controller or bypass state machine |
-| KEY2 / `2` | black-line tracking only; obstacle sensors do not take the motors | line controller |
-| KEY3 / `3` | one encoder-controlled figure eight, then stop | figure-eight controller |
-| KEY4 / `4` | one encoder-controlled square, then stop | square controller |
-| remote direction-pad centre (`0x05`) | play the preset buzzer phrase once without changing mode | non-blocking phrase player; safety warnings retain priority |
+| computer compile/link | passed | GNU Arm GCC, application -Wall -Wextra -Werror; BIN 10048 bytes |
+| controller/operator host tests | passed | 237 assertions; all 16 masks, filtering, timeout bounds, repeat/held keys, NEC and tick wrap |
+| board/motor host tests | passed | 18079 assertions including full PWM sweep, GPIO order, direction mapping, reversal interval, UART; HAL/register stubs |
+| artifact / IDE static checks | passed | 22 compiled C source hashes match manifest; old control symbols absent; Debug/Release source exclusions checked |
+| flash/readback/GO | not performed | this simple candidate has never been deployed by this task |
+| wheels off ground | not performed | host register tests do not prove motor motion |
+| ground driving | not performed | PWM and timeout values remain initial settings for actual testing |
 
-The infrared remote also supplies the virtual mode keys and a stop command.
+The old firmware's buzzer pass or flash record does not validate the new
+candidate's motor or sensor behavior. Details and use instructions are in
+`SimpleLine/README.md`.
 
-## Current line-loss behavior
+## Next step and update protocol
 
-Latest user ground observation before this deployment (2026-09-05): KEY2 could
-produce 1-, 5- or 8-beep drive alarms, and all-white recovery could alternate
-only very small opposite rotations. The new recovery avoids DriveBase position
-mode and its fine per-wheel completion during line reacquisition.
+The requested branch implementation, local source commit, build and host
+verification are complete. No hardware operation is currently authorized.
+A later explicit flash request should first enumerate ports and refresh the
+other branch's deployment state, retain the calibration page, then verify the
+exact candidate. Afterwards separately check sensor order, lifted-wheel
+directions/STOP, and ground straight/left/right/loss/wide-line behavior.
 
-The deployed `1bf6fe6` recovery changes KEY1/KEY2 as follows:
-
-- Normal tracking retains up to 16 middle-line encoder snapshots at 20 ms
-  intervals. On loss it actively brakes; a line seen while stopping is
-  confirmed before any reverse move.
-- With reliable recent forward history, all four wheels reverse together at
-  1870 CPS toward a 160-600 ms-old reference. The group stops when any wheel
-  reaches the shared budget, limited to 45 mm / 600 ms with an 8 mm margin.
-  At most two such retreats are allowed; absent history does not cause a blind
-  reverse move.
-- Search uses equal-and-opposite 2493-CPS wheel groups and the existing bounded
-  lagging-wheel assistance. Three all-white scans widen to 140, 280 and 420 mm
-  budgets with corresponding 700, 1400 and 2100 ms limits. Matching outer-line
-  guidance may extend only to 420 mm / 2800 ms.
-- After a failed scan, all four wheels reverse as a group toward its starting
-  counts. The first wheel to reach its coarse return budget stops the group;
-  individual wheels are not micro-positioned or repeatedly corrected. Very
-  small, badly imbalanced or above-450-mm returns are rejected.
-- Middle or single-outer line evidence brakes the group immediately. A middle
-  hit is stationary-confirmed before at least 500 ms of low-speed capture;
-  stable outer evidence selects the next search direction but cannot directly
-  restore normal-speed travel.
-- Any segment with a wheel moving less than 5 mm, a DriveBase fault, failed
-  return, three exhausted scans or the shared 8-second deadline stops recovery.
-  The recovery never clears a latched drive fault and does not call the
-  position-motion API. Wheel travel still cannot prove chassis displacement.
-
-## Current line-turn load assistance
-
-- Commit `63dbfe6`, retained in `1bf6fe6`, keeps the requested four-wheel CPS targets and adds a
-  bounded PWM supplement only to an accepted line-tracking differential or
-  counter-rotation command. Straight travel, wide-line travel, stop, encoder
-  position retrace/rollback and non-line modes do not receive this supplement.
-- Each wheel is evaluated independently. Assistance begins only after its
-  target ramp reaches at least 1412 CPS and measured same-direction speed stays
-  below 85 percent of target for 40 ms.
-- The extra PWM is half the same-direction speed deficit, capped at 600 and
-  ramped upward by at most 5 PWM per millisecond. Total output remains clamped
-  to the existing 3599 hardware limit; the existing startup pulse has priority.
-- Reaching the 85-percent speed threshold, reverse feedback, a mismatched or
-  expired authorization, stop, position control or a drive fault clears the
-  supplement immediately. Wheel-speed feedback is not current or torque
-  feedback, so ground traction and actual turning improvement remain untested.
-
-## Current position-control handoff
-
-- Commit `b424189`, retained in `1bf6fe6`, fixes the shared DriveBase transition from continuous
-  position-control PWM to the short-pulse region used near a target.
-- When an individual wheel enters that low-speed region, its previous
-  continuous PWM is first set to zero and a fresh stop-settle window is
-  established. The existing 36 ms pulse gap and 25 ms per-wheel staggering are
-  then retained instead of issuing a pulse while the wheel is still driven.
-- Old pulse-response state is cancelled when switching between pulse and
-  continuous control. Four-wheel distance targets, tolerances, synchronization,
-  fault thresholds and fault latching are unchanged.
-- This still affects other DriveBase position moves, but the current lost-line
-  recovery no longer invokes position mode. Host tests reproduce both forward
-  and reverse handoff; actual wheel inertia and alarm behavior remain untested.
-
-## Current infrared-remote audio behavior
-
-- Latest physical observation before this fix: pressing the intended sound
-  button produced no audible result. Source inspection found that the active
-  buzzer's PG12 output setup existed only in the unused legacy
-  `MX_Experiment1_GPIO_Init()` path; the integrated startup calls
-  `MX_GPIO_Init()` instead.
-- Commit `0d31f10` initializes PG12 low as a push-pull output in
-  `MX_GPIO_Init()` before the phrase player starts. It does not reconfigure
-  the entity keys, change the NEC key map, or change motor/line behavior.
-- The direction-pad centre/buzzer command `0x05` maps to a dedicated
-  `IR_REMOTE_VIRTUAL_AUDIO_ONCE` event.
-- One complete NEC frame starts exactly one 1.53-second preset five-attack
-  phrase and does not start, stop, or change a driving mode.
-- NEC repeat frames remain suppressed, so holding the key does not queue
-  repeated playback. A later fresh press restarts one complete phrase.
-- Existing stop/fault, encoder, ultrasonic and bypass warning arbitration can
-  immediately cancel this lower-priority audio.
-- The serial `b` command remains an equivalent one-shot diagnostic entry.
-- After flashing `0d31f10`, the user short-pressed the intended sound button
-  and explicitly confirmed audible output (`响了`). The same fix remains in
-  deployed `1bf6fe6`.
-
-## Confirmed hardware facts
-
-- All four encoders are repaired and usable as AB quadrature inputs.
-- M2 is mapped to PA15/PB3; do not restore the obsolete fallback.
-- Wheel order is M1 left-front, M2 left-rear, M3 right-front, M4 right-rear.
-- Motor direction compensation remains centralized in `Core/Src/motorPWM.c`.
-- K210 is physically removed for now.
-- OLED is the external J12 display and includes battery/status information.
-- Encoder distance/angle is a wheel-motion estimate; ground yaw requires
-  calibration because slip and battery/load change the result.
-
-## Evidence ledger
-
-| Evidence level | Current result | Scope |
-|---|---|---|
-| computer build/link | passed | integrated formal `1bf6fe6`; BIN is 67800 bytes; buzzer fix retained |
-| host regression | passed | 2493/1870-CPS recovery profiles pass continuous retreat, widening scans, coarse returns, capture, faults and watchdog; real DriveBase integration remains in speed mode without position timeout/sync faults; load-assist and position-handoff regressions also pass; MSVC /W4 /WX |
-| flash/readback/GO | passed | COM11 at 57600 baud; 34-page selective erase; calibration page preserved; 67800-byte write and readback; `VERIFY OK`; `GO OK` |
-| physical buzzer | passed | user explicitly confirmed `响了` after the PG12 initialization fix; fix retained in current firmware |
-| wheels off ground | not performed this turn | diagnostic image compilation is not a lifted-wheel test |
-| ground driving | current continuous-recovery firmware untested | grouped retreat/search/return, capture, drift and any fault alarm require same-surface observation |
-
-## Open issue and next safe step
-
-The requested continuous grouped recovery integration, formal build, all host
-regressions, flash, readback verification and GO are complete. Physical buzzer
-output was confirmed on an earlier firmware and its source fix is retained.
-Ground-test loss after straight travel and after left/right curves. Observe
-whether it now makes meaningful grouped motion instead of alternating tiny
-pulses, whether failed scans return approximately, and whether capture holds.
-If it stops with warning beeps, record the group count or serial fault mask.
-Use the immediate rollback point if it performs worse.
-
-## Update protocol
-
-After integrating code, flashing, or receiving a physical result, the
-coordinator must update the applicable fields and evidence row. Keep old facts
-in Git history instead of accumulating a long diary here. Never mark a physical
-test passed from a successful compilation, programmer verification, OLED text,
-or encoder counts alone.
+Only record physical conclusions actually observed. Keep source, candidate
+artifacts and last flashed facts separate; never call host tests or byte
+readback a successful ground test.
