@@ -1,23 +1,18 @@
-/* Host regression: real line_tracking.c and encoder_turn.c, mocked HAL and
-   DriveBase. Sensor histories and ownership are tested; no physical yaw or
-   wheel-speed-loop validation is implied. */
+/* Real line controller with mocked HAL/DriveBase. These tests validate
+   sensor histories and motor ownership, not wheel traction or physical yaw. */
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
 #include "main.h"
 #include "line_tracking.h"
-#include "encoder_turn.h"
 #include "drive_base.h"
-#include "wheel_encoder.h"
 
 static uint32_t tick;
 static DriveBaseTelemetry telemetry;
-static DrivePositionCommand move;
-static unsigned starts;
-static int reject_start;
 static LineTrackingCommand output;
-static WheelEncoderCounts counts, start_counts;
-void WheelEncoder_GetCounts(WheelEncoderCounts *c) { *c = counts; }
+static unsigned speed_commands, brake_commands;
+static uint32_t brake_started;
+static uint8_t fault_on_task;
 
 uint32_t HAL_GetTick(void) { return tick; }
 int HAL_GPIO_ReadPin(GPIO_TypeDef *p, uint16_t n)
@@ -26,156 +21,179 @@ void HAL_GPIO_Init(GPIO_TypeDef *p, GPIO_InitTypeDef *g)
 { (void)p; (void)g; }
 int32_t DriveBase_EquivalentCpsFromPwm(int16_t p) { return p; }
 void DriveBase_GetTelemetry(DriveBaseTelemetry *t) { *t = telemetry; }
-void DriveBase_Task(uint32_t now) { (void)now; }
-DrivePositionState DriveBase_GetPositionState(void)
-{ return telemetry.position_state; }
+void DriveBase_Task(uint32_t now)
+{
+  if (fault_on_task)
+  {
+    telemetry.fault_mask = DRIVE_FAULT_MOTOR1;
+    telemetry.mode = DRIVE_BASE_FAULT;
+  }
+  else if (telemetry.mode == DRIVE_BASE_BRAKING && now - brake_started >= 52U)
+    telemetry.mode = DRIVE_BASE_STOPPED;
+}
 uint8_t DriveBase_GetFaultMask(void) { return telemetry.fault_mask; }
 void DriveBase_Stop(DriveStopMode mode)
 {
-  (void)mode;
-  telemetry.mode = DRIVE_BASE_STOPPED;
-  telemetry.position_state = DRIVE_POSITION_IDLE;
-}
-uint8_t DriveBase_StartPositionMove(const DrivePositionCommand *c)
-{
-  unsigned i;
-  if (reject_start) return 0;
-  move = *c;
-  start_counts = counts;
-  ++starts;
-  telemetry.mode = DRIVE_BASE_POSITION;
-  telemetry.position_state = DRIVE_POSITION_RUNNING;
-  for (i = 0; i < 4; ++i)
+  if (mode == DRIVE_STOP_BRAKE)
   {
-    telemetry.position_target_counts[i] = c->delta_counts[i];
-    telemetry.position_moved_counts[i] = 0;
+    ++brake_commands;
+    brake_started = tick;
+    telemetry.mode = DRIVE_BASE_BRAKING;
   }
-  return 1;
+  else telemetry.mode = DRIVE_BASE_STOPPED;
+  memset(telemetry.requested_cps, 0, sizeof telemetry.requested_cps);
 }
-uint8_t DriveBase_RequestPositionStop(DriveStopMode mode)
+void DriveBase_SetSideCps(int32_t left, int32_t right)
 {
-  (void)mode;
-  telemetry.mode = DRIVE_BASE_BRAKING;
-  telemetry.position_state = DRIVE_POSITION_SETTLING;
-  return 1;
+  /* A new speed command during active braking would violate ownership even
+     though the production DriveBase rejects it. Make that visible here. */
+  assert(telemetry.mode != DRIVE_BASE_BRAKING && telemetry.fault_mask == 0);
+  ++speed_commands;
+  telemetry.mode = DRIVE_BASE_SPEED;
+  telemetry.requested_cps[0] = telemetry.requested_cps[1] = left;
+  telemetry.requested_cps[2] = telemetry.requested_cps[3] = right;
 }
 static LineTrackingAction sample(unsigned mask, uint32_t dt)
 {
   LineTrackingReading r = {mask & 1, (mask >> 1) & 1,
                           (mask >> 2) & 1, (mask >> 3) & 1};
+  LineTrackingAction action;
   tick += dt;
-  return line_tracking_compute(&r, 3000, &output);
+  action = line_tracking_compute(&r, 3000, &output);
+  /* Production caller applies valid commands after each compute. */
+  if (output.valid)
+  {
+    if (output.left_cps == 0 && output.right_cps == 0)
+      DriveBase_Stop(DRIVE_STOP_COAST);
+    else DriveBase_SetSideCps(output.left_cps, output.right_cps);
+  }
+  return action;
 }
 static void reset(uint8_t forward, uint8_t smooth)
 {
   line_tracking_reset();
-  EncoderTurn_Init();
   memset(&telemetry, 0, sizeof telemetry);
-  memset(&counts, 0, sizeof counts);
-  starts = 0;
-  reject_start = 0;
+  speed_commands = brake_commands = 0;
+  fault_on_task = 0;
   line_tracking_set_no_line_forward(forward);
   line_tracking_set_smooth_mode(smooth);
 }
-static void hint(unsigned mask)
+static void hint(unsigned mask) { sample(mask, 1); sample(mask, 25); }
+static void assert_search(int side)
 {
-  sample(mask, 1);
-  sample(mask, 25);
+  assert(!output.valid && telemetry.mode == DRIVE_BASE_SPEED);
+  assert(output.action == (side < 0 ? LINE_ACTION_SEARCH_LEFT :
+                                      LINE_ACTION_SEARCH_RIGHT));
+  assert(telemetry.requested_cps[0] == telemetry.requested_cps[1]);
+  assert(telemetry.requested_cps[2] == telemetry.requested_cps[3]);
+  assert(telemetry.requested_cps[0] == -telemetry.requested_cps[2]);
+  assert(side < 0 ? telemetry.requested_cps[0] < 0 :
+                   telemetry.requested_cps[0] > 0);
 }
 static void start_search(int side)
 {
   assert(sample(0, 1) == LINE_ACTION_STOP);
   sample(0, 70);
-  assert(starts == 1 && !output.valid);
-  assert(sample(0, 1) == (side < 0 ? LINE_ACTION_SEARCH_LEFT :
-                                    LINE_ACTION_SEARCH_RIGHT));
-  assert(move.delta_counts[0] == move.delta_counts[1]);
-  assert(move.delta_counts[2] == move.delta_counts[3]);
-  assert(move.delta_counts[0] == -move.delta_counts[2]);
-  assert(side < 0 ? move.delta_counts[0] < 0 : move.delta_counts[0] > 0);
-  assert(move.maximum_cps[0] == move.maximum_cps[1]);
-  assert(move.maximum_cps[2] == move.maximum_cps[3]);
+  assert_search(side);
 }
-static void progress(unsigned percent)
+static void finish_reverse(int side)
 {
-  unsigned i;
-  for (i = 0; i < 4; ++i)
-    telemetry.position_moved_counts[i] =
-        move.delta_counts[i] * (int32_t)percent / 100;
-  counts.motor1 = start_counts.motor1 + telemetry.position_moved_counts[0];
-  counts.motor2 = start_counts.motor2 + telemetry.position_moved_counts[1];
-  counts.motor3 = start_counts.motor3 + telemetry.position_moved_counts[2];
-  counts.motor4 = start_counts.motor4 + telemetry.position_moved_counts[3];
+  unsigned before = speed_commands;
+  assert(!output.valid && telemetry.mode == DRIVE_BASE_BRAKING);
+  sample(0, 30);
+  assert(telemetry.mode == DRIVE_BASE_BRAKING && speed_commands == before);
+  sample(0, 22);
+  assert(output.valid && telemetry.mode == DRIVE_BASE_STOPPED);
+  sample(0, 69); assert(speed_commands == before);
+  sample(0, 1); assert_search(side);
+}
+static void capture(void)
+{
+  sample(5, 1); sample(5, 12);
+  assert(!output.valid && telemetry.mode == DRIVE_BASE_BRAKING);
+  sample(5, 30); assert(!output.valid);
+  sample(5, 22); sample(5, 1);
+  assert(output.valid && output.left_cps > 0 &&
+         output.left_cps == output.right_cps);
 }
 int main(void)
 {
   unsigned smooth, forward;
-  int32_t first_target;
   for (smooth = 0; smooth <= 1; ++smooth)
   for (forward = 0; forward <= 1; ++forward)
   {
+    /* Most recent stable side wins over earlier departure history. */
     reset((uint8_t)forward, (uint8_t)smooth);
     sample(5, 1); hint(1); hint(8); start_search(1);
     reset((uint8_t)forward, (uint8_t)smooth);
     sample(5, 1); hint(4); hint(2); start_search(-1);
 
-    /* Centred travel and intersections must clear a previous bend. */
+    /* No reliable direction must produce exploration, not latched STOP. */
     reset((uint8_t)forward, (uint8_t)smooth);
-    hint(1); sample(5, 1); sample(5, 81); sample(0, 1); sample(0, 100);
-    assert(starts == 0 && output.valid && output.left_cps == 0);
+    hint(4); sample(5, 1); sample(5, 81); start_search(-1);
+    sample(0, 250); finish_reverse(1);
+    sample(0, 500); finish_reverse(-1);
     reset((uint8_t)forward, (uint8_t)smooth);
-    hint(1); sample(15, 1); sample(0, 1); sample(0, 100);
-    assert(starts == 0);
+    hint(4); sample(15, 1); start_search(-1);
+    reset((uint8_t)forward, (uint8_t)smooth);
+    hint(4); sample(2, 1); start_search(-1);
+    reset((uint8_t)forward, (uint8_t)smooth);
+    hint(4); sample(0, 201); sample(0, 70); assert_search(-1);
 
-    /* A fleeting opposite hit must not reuse the old direction. */
-    reset((uint8_t)forward, (uint8_t)smooth);
-    hint(1); sample(8, 1); sample(0, 1); sample(0, 100);
-    assert(starts == 0);
-    reset((uint8_t)forward, (uint8_t)smooth);
-    hint(1); sample(0, 201); sample(0, 100); assert(starts == 0);
-
-    /* Outer-only detection cannot take the motors away from search. */
+    /* Search can continue beyond both old limits when sensors guide it.
+       Wheel counts are intentionally irrelevant to recovery termination. */
     reset((uint8_t)forward, (uint8_t)smooth);
     hint(1); start_search(-1);
-    assert(sample(2, 10) == LINE_ACTION_SEARCH_LEFT && !output.valid);
-    first_target = move.delta_counts[2];
-    progress(40);
-    sample(5, 1); sample(5, 12);
-    assert(!output.valid && telemetry.mode == DRIVE_BASE_BRAKING);
-    /* Braking travel is charged even while position telemetry is stale. */
-    progress(55);
-    memset(telemetry.position_moved_counts, 0,
-           sizeof telemetry.position_moved_counts);
-    telemetry.mode = DRIVE_BASE_STOPPED;
-    sample(5, 1); sample(5, 1);
-    assert(output.valid && output.left_cps > 0 &&
-           output.left_cps == output.right_cps);
-    /* Losing the capture retains the remaining angle and episode clock. */
-    sample(0, 1); sample(0, 70);
-    assert(starts == 2 && move.delta_counts[2] < first_target / 2);
-    progress(101);
-    assert(sample(0, 1) == LINE_ACTION_STOP && output.valid);
-    sample(5, 1); sample(5, 300); assert(output.left_cps == 0 && starts == 2);
+    telemetry.position_moved_counts[0] = -100000;
+    telemetry.position_moved_counts[2] = 100000;
+    sample(2, 3000); assert_search(-1);
+    capture();
+    sample(5, 250); assert(output.left_cps > 0);
+    sample(5, 5000); assert(output.left_cps > 0);
 
+    /* A confirmed opposite outer hit corrects the initial prediction. */
     reset((uint8_t)forward, (uint8_t)smooth);
     hint(1); start_search(-1);
-    assert(sample(5, 2500) == LINE_ACTION_STOP && output.valid);
+    sample(8, 1); sample(8, 19); assert_search(-1);
+    sample(8, 1); finish_reverse(1);
+    capture();
+
+    /* An empty leg reverses and widens, rather than ending in STOP. */
+    reset((uint8_t)forward, (uint8_t)smooth);
+    hint(1); start_search(-1);
+    sample(0, 900); finish_reverse(1);
+    sample(0, 900); assert_search(1);
+    sample(0, 900); finish_reverse(-1);
+
+    /* One-frame centre chatter cannot capture while stationary either. */
+    reset((uint8_t)forward, (uint8_t)smooth);
+    hint(1); sample(0, 1); sample(5, 10); sample(0, 60);
+    assert_search(-1);
+    sample(5, 1); sample(0, 1); assert_search(-1);
+
+    /* Failed capture keeps the episode watchdog, but has no angle budget. */
+    reset((uint8_t)forward, (uint8_t)smooth);
+    hint(1); start_search(-1); capture();
+    sample(0, 1); sample(0, 70); assert_search(-1);
+    sample(2, 7800);
+    assert(output.valid && output.left_cps == 0);
     sample(5, 300); assert(output.left_cps == 0);
 
     reset((uint8_t)forward, (uint8_t)smooth);
-    hint(1); start_search(-1);
-    telemetry.position_state = DRIVE_POSITION_FAULT;
-    telemetry.fault_mask = DRIVE_FAULT_MOTOR1;
-    assert(sample(0, 1) == LINE_ACTION_STOP && output.valid);
+    hint(1); start_search(-1); fault_on_task = 1;
+    sample(0, 1); assert(output.valid && output.left_cps == 0);
+    sample(5, 300); assert(output.left_cps == 0);
+
+    /* User mode reset must stop a directly owned search or brake. */
     reset((uint8_t)forward, (uint8_t)smooth);
-    hint(1); reject_start = 1; sample(0, 1); sample(0, 70);
-    assert(starts == 0 && output.valid && output.left_cps == 0);
+    hint(1); start_search(-1);
+    line_tracking_reset(); assert(telemetry.mode == DRIVE_BASE_STOPPED);
+    sample(5, 1); assert(output.left_cps > 0);
   }
   reset(1, 1); assert(sample(0, 1) == LINE_ACTION_FORWARD);
-  reset(0, 1); assert(sample(0, 1) == LINE_ACTION_STOP);
-  /* HAL millisecond rollover still permits a fresh stable hint. */
+  reset(0, 1); start_search(-1);
   tick = UINT32_MAX - 15;
   reset(0, 1); hint(1); start_search(-1);
-  puts("PASS: direction history, four-wheel targets, capture ownership, cumulative budget, timeout, faults, mode reset, tick rollover");
+  puts("PASS: fresh/unknown direction, widening reversals, sensor correction, acute-turn continuation, capture/brake ownership, watchdog, faults, mode reset, tick rollover");
   return 0;
 }

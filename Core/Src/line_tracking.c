@@ -3,16 +3,14 @@
  *
  * 传感器输出低电平表示黑线。该文件是黑线位置外环，只生成左右目标
  * CPS；DriveBase 使用四路编码器形成各轮速度内环。丢线搜索使用四轮
- * 差速位置闭环，方向取近期稳定探头位置，累计搜索受角度和时间限制。
+ * 差速速度闭环，按探头反馈换向并扩大搜索，不以固定转角判定失败。
  */
 
 #include "line_tracking.h"
 
 #include "drive_base.h"
-#include "encoder_turn.h"
 #include "main.h"
 #include "motorPWM.h"
-#include "wheel_encoder.h"
 
 static uint8_t no_line_forward_enabled = 1U;
 static uint8_t line_has_been_seen;
@@ -24,10 +22,10 @@ static uint8_t direction_center_active;
 static uint32_t direction_center_since_ms;
 static uint8_t recovery_episode_active;
 static uint32_t recovery_episode_started_ms;
-static int32_t recovery_used_mdeg;
-static int32_t recovery_segment_base_mdeg;
-static int32_t recovery_segment_angle_mdeg;
-static WheelEncoderCounts recovery_segment_start_counts;
+static uint32_t recovery_leg_started_ms;
+static uint32_t recovery_leg_duration_ms;
+static int8_t recovery_outer_candidate;
+static uint32_t recovery_outer_since_ms;
 static int8_t recovery_turn_direction;
 static int8_t outer_turn_direction;
 static uint32_t outer_turn_started_ms;
@@ -50,6 +48,7 @@ typedef enum
   LINE_RECOVERY_WAIT_SEARCH,
   LINE_RECOVERY_TURN_SEARCH,
   LINE_RECOVERY_BRAKE_CAPTURE,
+  LINE_RECOVERY_BRAKE_REVERSE,
   LINE_RECOVERY_STOPPED,
   LINE_RECOVERY_WAIT_FORWARD,
   LINE_RECOVERY_SETTLE
@@ -59,9 +58,11 @@ static LineRecoveryState recovery_state;
 static uint32_t recovery_state_started_ms;
 
 #define TRACKING_DIRECTION_GUARD_MS          70U
-#define TRACKING_SEARCH_ANGLE_MDEG          85000L
+#define TRACKING_SEARCH_FIRST_LEG_MS          900U
+#define TRACKING_SEARCH_PROBE_LEG_MS          250U
+#define TRACKING_SEARCH_MAX_LEG_MS           2400U
 #define TRACKING_SEARCH_TURN_CPS             3600L
-#define TRACKING_SEARCH_TIMEOUT_MS           2500U
+#define TRACKING_SEARCH_TIMEOUT_MS           8000U
 #define TRACKING_HINT_CONFIRM_MS               20U
 #define TRACKING_HINT_MAX_AGE_MS              200U
 #define TRACKING_HINT_CENTER_CLEAR_MS          80U
@@ -153,7 +154,7 @@ static void command_stop(LineTrackingCommand *command)
   command_set_pwm(command, 0, 0, LINE_ACTION_STOP);
 }
 
-static void command_release_to_position(LineTrackingCommand *command,
+static void command_release_to_drive(LineTrackingCommand *command,
                                         LineTrackingAction action)
 {
   if (command == 0) return;
@@ -216,35 +217,23 @@ static void update_direction_hint(const LineTrackingReading *reading,
   }
 }
 
-/* Charge the furthest wheel's progress, retaining the maximum through the
-   brake pulse. Each retry receives only the remainder of the same episode.
-   This is an encoder travel budget, not a measurement of chassis yaw. */
-static void update_search_budget(void)
+/* A leg timeout means try the other side, not a failed corner. A matching
+   outer sensor can keep the current sweep alive until a middle sensor arrives.
+   The episode watchdog remains independent of all leg/capture restarts. */
+static void reverse_search(uint32_t now)
 {
-  DriveBaseTelemetry telemetry;
-  WheelEncoderCounts counts;
-  int32_t moved[DRIVE_BASE_WHEEL_COUNT];
-  uint8_t motor;
-  DriveBase_GetTelemetry(&telemetry);
-  /* Position telemetry pauses during the active brake. Read encoders directly
-     so cancelling its final settle cannot omit braking travel from the budget. */
-  WheelEncoder_GetCounts(&counts);
-  moved[0] = counts.motor1 - recovery_segment_start_counts.motor1;
-  moved[1] = counts.motor2 - recovery_segment_start_counts.motor2;
-  moved[2] = counts.motor3 - recovery_segment_start_counts.motor3;
-  moved[3] = counts.motor4 - recovery_segment_start_counts.motor4;
-  for (motor = 0U; motor < DRIVE_BASE_WHEEL_COUNT; ++motor)
+  DriveBase_Stop(DRIVE_STOP_BRAKE);
+  recovery_turn_direction = (int8_t)-recovery_turn_direction;
+  if (recovery_leg_duration_ms < TRACKING_SEARCH_MAX_LEG_MS)
   {
-    int32_t target = telemetry.position_target_counts[motor];
-    if (target != 0L)
-    {
-      int32_t progress = (int32_t)(
-          ((int64_t)moved[motor] *
-           recovery_segment_angle_mdeg) / target);
-      int32_t total = recovery_segment_base_mdeg + progress;
-      if (total > recovery_used_mdeg) recovery_used_mdeg = total;
-    }
+    recovery_leg_duration_ms *= 2U;
+    if (recovery_leg_duration_ms > TRACKING_SEARCH_MAX_LEG_MS)
+      recovery_leg_duration_ms = TRACKING_SEARCH_MAX_LEG_MS;
   }
+  recovery_outer_candidate = 0;
+  recovery_center_candidate = 0U;
+  recovery_state = LINE_RECOVERY_BRAKE_REVERSE;
+  recovery_state_started_ms = now;
 }
 
 void line_tracking_init(void)
@@ -269,10 +258,9 @@ void line_tracking_init(void)
 
 void line_tracking_reset(void)
 {
-  if (recovery_state == LINE_RECOVERY_TURN_SEARCH ||
-      recovery_state == LINE_RECOVERY_BRAKE_CAPTURE)
+  if (recovery_episode_active != 0U)
   {
-    EncoderTurn_Stop();
+    DriveBase_Stop(DRIVE_STOP_COAST);
   }
   line_has_been_seen = 0U;
   predicted_turn_direction = 0;
@@ -283,9 +271,10 @@ void line_tracking_reset(void)
   direction_center_since_ms = HAL_GetTick();
   recovery_episode_active = 0U;
   recovery_episode_started_ms = HAL_GetTick();
-  recovery_used_mdeg = 0L;
-  recovery_segment_base_mdeg = 0L;
-  recovery_segment_angle_mdeg = 0L;
+  recovery_leg_started_ms = HAL_GetTick();
+  recovery_leg_duration_ms = TRACKING_SEARCH_PROBE_LEG_MS;
+  recovery_outer_candidate = 0;
+  recovery_outer_since_ms = HAL_GetTick();
   recovery_turn_direction = 0;
   outer_turn_direction = 0;
   outer_turn_started_ms = HAL_GetTick();
@@ -368,6 +357,7 @@ LineTrackingAction line_tracking_compute(const LineTrackingReading *reading,
 
   if (base_speed <= 0)
   {
+    line_tracking_reset();
     command_stop(command);
     return LINE_ACTION_STOP;
   }
@@ -386,40 +376,121 @@ LineTrackingAction line_tracking_compute(const LineTrackingReading *reading,
   }
 
   if (recovery_episode_active != 0U &&
-      now - recovery_episode_started_ms >= TRACKING_SEARCH_TIMEOUT_MS)
+      (DriveBase_GetFaultMask() != 0U ||
+       now - recovery_episode_started_ms >= TRACKING_SEARCH_TIMEOUT_MS))
   {
-    EncoderTurn_Stop();
+    DriveBase_Stop(DRIVE_STOP_COAST);
     recovery_state = LINE_RECOVERY_STOPPED;
     command_stop(command);
     return LINE_ACTION_STOP;
   }
 
-  /* A lost-line search owns DriveBase until a middle sensor sees the line.
-     X2/X4 are only an early warning: releasing the in-place turn on an outer
-     hit made the car creep forward, lose the line again, and repeat. */
+  /* Search owns DriveBase, using the same four-wheel speed feedback as normal
+     tracking. No position target or chassis-angle estimate ends a corner. */
   if (recovery_state == LINE_RECOVERY_TURN_SEARCH)
   {
-    EncoderTurnState turn_state;
+    int8_t outer_side = reading->x2_black && !reading->x4_black ? -1 :
+                       (reading->x4_black && !reading->x2_black ? 1 : 0);
     LineTrackingAction search_action = recovery_turn_direction < 0
                                      ? LINE_ACTION_SEARCH_LEFT
                                      : LINE_ACTION_SEARCH_RIGHT;
-
-    command_release_to_position(command, search_action);
-    EncoderTurn_Task();
-    update_search_budget();
-    turn_state = EncoderTurn_GetState();
-    if (turn_state == ENCODER_TURN_DONE ||
-        turn_state == ENCODER_TURN_FAULT ||
-        recovery_used_mdeg >= TRACKING_SEARCH_ANGLE_MDEG)
+    command_release_to_drive(command, search_action);
+    DriveBase_Task(now);
+    if (DriveBase_GetFaultMask() != 0U)
     {
-      EncoderTurn_Stop();
-      recovery_center_candidate = 0U;
+      DriveBase_Stop(DRIVE_STOP_COAST);
       recovery_state = LINE_RECOVERY_STOPPED;
-      recovery_state_started_ms = now;
       command_stop(command);
       return LINE_ACTION_STOP;
     }
 
+    if (center_visible != 0U)
+    {
+      recovery_outer_candidate = 0;
+      if (recovery_center_candidate == 0U)
+      {
+        recovery_center_candidate = 1U;
+        recovery_center_since_ms = now;
+      }
+      else if (now - recovery_center_since_ms >=
+               TRACKING_SEARCH_CENTER_CONFIRM_MS)
+      {
+        DriveBase_Stop(DRIVE_STOP_BRAKE);
+        recovery_center_candidate = 0U;
+        recovery_state = LINE_RECOVERY_BRAKE_CAPTURE;
+        recovery_state_started_ms = now;
+        return search_action;
+      }
+    }
+    else
+    {
+      recovery_center_candidate = 0U;
+      if (outer_side != 0 && outer_side != recovery_turn_direction)
+      {
+        if (recovery_outer_candidate != outer_side)
+        {
+          recovery_outer_candidate = outer_side;
+          recovery_outer_since_ms = now;
+        }
+        else if (now - recovery_outer_since_ms >= TRACKING_HINT_CONFIRM_MS)
+        {
+          reverse_search(now);
+          return search_action;
+        }
+      }
+      else
+      {
+        recovery_outer_candidate = 0;
+      }
+      /* A line on the side we are approaching is useful evidence even beyond
+         the nominal leg duration. All-white or ambiguous outer hits are not. */
+      if (now - recovery_leg_started_ms >= recovery_leg_duration_ms &&
+          outer_side != recovery_turn_direction)
+      {
+        reverse_search(now);
+        return search_action;
+      }
+    }
+
+    DriveBase_SetSideCps(recovery_turn_direction < 0
+                        ? -TRACKING_SEARCH_TURN_CPS : TRACKING_SEARCH_TURN_CPS,
+                        recovery_turn_direction < 0
+                        ? TRACKING_SEARCH_TURN_CPS : -TRACKING_SEARCH_TURN_CPS);
+    return search_action;
+  }
+
+  if (recovery_state == LINE_RECOVERY_BRAKE_CAPTURE ||
+      recovery_state == LINE_RECOVERY_BRAKE_REVERSE)
+  {
+    DriveBaseTelemetry drive_telemetry;
+    uint8_t reversing = recovery_state == LINE_RECOVERY_BRAKE_REVERSE;
+    LineTrackingAction search_action = recovery_turn_direction < 0
+                                     ? LINE_ACTION_SEARCH_LEFT
+                                     : LINE_ACTION_SEARCH_RIGHT;
+    command_release_to_drive(command, search_action);
+    DriveBase_Task(now);
+    DriveBase_GetTelemetry(&drive_telemetry);
+    if (drive_telemetry.fault_mask != 0U)
+    {
+      DriveBase_Stop(DRIVE_STOP_COAST);
+      recovery_state = LINE_RECOVERY_STOPPED;
+      command_stop(command);
+      return LINE_ACTION_STOP;
+    }
+    if (drive_telemetry.mode == DRIVE_BASE_BRAKING)
+      return search_action;
+
+    command_stop(command);
+    recovery_state = (reversing == 0U && center_visible != 0U)
+                   ? LINE_RECOVERY_SETTLE : LINE_RECOVERY_WAIT_SEARCH;
+    recovery_state_started_ms = now;
+    recovery_center_candidate = 0U;
+    return LINE_ACTION_STOP;
+  }
+
+  if (recovery_state == LINE_RECOVERY_WAIT_SEARCH)
+  {
+    command_stop(command);
     if (center_visible != 0U)
     {
       if (recovery_center_candidate == 0U)
@@ -430,128 +501,27 @@ LineTrackingAction line_tracking_compute(const LineTrackingReading *reading,
       else if (now - recovery_center_since_ms >=
                TRACKING_SEARCH_CENTER_CONFIRM_MS)
       {
+        recovery_state = LINE_RECOVERY_SETTLE;
+        recovery_state_started_ms = now;
         recovery_center_candidate = 0U;
-        if (EncoderTurn_RequestStop() != 0U)
-        {
-          /* Keep valid=0 while DriveBase applies its bounded active brake and
-             encoder settle; speed mode must not overwrite that sequence. */
-          recovery_state = LINE_RECOVERY_BRAKE_CAPTURE;
-          recovery_state_started_ms = now;
-          return search_action;
-        }
-
-        EncoderTurn_Stop();
-        recovery_state = LINE_RECOVERY_WAIT_FORWARD;
-        recovery_state_started_ms = now;
-        command_stop(command);
-        return LINE_ACTION_STOP;
       }
-    }
-    else
-    {
-      recovery_center_candidate = 0U;
-    }
-
-    return search_action;
-  }
-
-  if (recovery_state == LINE_RECOVERY_BRAKE_CAPTURE)
-  {
-    DriveBaseTelemetry drive_telemetry;
-    EncoderTurnState turn_state;
-    LineTrackingAction search_action = recovery_turn_direction < 0
-                                     ? LINE_ACTION_SEARCH_LEFT
-                                     : LINE_ACTION_SEARCH_RIGHT;
-
-    command_release_to_position(command, search_action);
-    EncoderTurn_Task();
-    update_search_budget();
-    turn_state = EncoderTurn_GetState();
-    if (turn_state == ENCODER_TURN_RUNNING)
-    {
-      DriveBase_GetTelemetry(&drive_telemetry);
-      if (drive_telemetry.mode == DRIVE_BASE_STOPPED &&
-          drive_telemetry.position_state == DRIVE_POSITION_SETTLING)
-      {
-        /* DriveBase has completed the 30 ms direction guard and bounded
-           22 ms reverse-torque pulse.  The generic position controller would
-           now wait another 90 ms before reporting DONE, but line capture does
-           not need that duplicate stationary observation.  Cancel only this
-           remaining position settle and hand the wheels to low-speed tracking
-           on the next control pass. */
-        EncoderTurn_Stop();
-        command_stop(command);
-        recovery_state = center_visible != 0U
-                       ? LINE_RECOVERY_SETTLE
-                       : LINE_RECOVERY_WAIT_SEARCH;
-        recovery_state_started_ms = now;
-        return LINE_ACTION_STOP;
-      }
-      return search_action;
-    }
-
-    EncoderTurn_Stop();
-    command_stop(command);
-    if (turn_state == ENCODER_TURN_FAULT)
-    {
-      recovery_state = LINE_RECOVERY_STOPPED;
-    }
-    else if (center_visible != 0U)
-    {
-      recovery_state = LINE_RECOVERY_SETTLE;
-    }
-    else
-    {
-      /* Braking inertia moved the line away again. Resume the same predicted
-         direction instead of issuing a short forward command. */
-      recovery_state = LINE_RECOVERY_WAIT_SEARCH;
-    }
-    recovery_state_started_ms = now;
-    return LINE_ACTION_STOP;
-  }
-
-  if (recovery_state == LINE_RECOVERY_WAIT_SEARCH)
-  {
-    command_stop(command);
-    if (recovery_used_mdeg >= TRACKING_SEARCH_ANGLE_MDEG)
-    {
-      recovery_state = LINE_RECOVERY_STOPPED;
       return LINE_ACTION_STOP;
     }
-    if (center_visible != 0U)
-    {
-      /* Already stationary: resume with the bounded low-speed capture
-         directly instead of inserting another direction guard. */
-      recovery_state = LINE_RECOVERY_SETTLE;
-      recovery_state_started_ms = now;
-      return LINE_ACTION_STOP;
-    }
-
+    recovery_center_candidate = 0U;
     if (now - recovery_state_started_ms >= TRACKING_DIRECTION_GUARD_MS)
     {
-      int32_t search_angle;
-      recovery_segment_base_mdeg = recovery_used_mdeg;
-      recovery_segment_angle_mdeg = TRACKING_SEARCH_ANGLE_MDEG -
-                                    recovery_used_mdeg;
-      search_angle = recovery_turn_direction < 0
-                   ? recovery_segment_angle_mdeg
-                   : -recovery_segment_angle_mdeg;
-
-      WheelEncoder_GetCounts(&recovery_segment_start_counts);
-      if (EncoderTurn_Start(search_angle, 0L,
-                            TRACKING_SEARCH_TURN_CPS) != 0U)
-      {
-        recovery_center_candidate = 0U;
-        recovery_state = LINE_RECOVERY_TURN_SEARCH;
-        recovery_state_started_ms = now;
-        command_release_to_position(command,
-            recovery_turn_direction < 0 ? LINE_ACTION_SEARCH_LEFT
-                                        : LINE_ACTION_SEARCH_RIGHT);
-      }
-      else
-      {
-        recovery_state = LINE_RECOVERY_STOPPED;
-      }
+      recovery_outer_candidate = 0;
+      recovery_state = LINE_RECOVERY_TURN_SEARCH;
+      recovery_leg_started_ms = now;
+      recovery_state_started_ms = now;
+      command_release_to_drive(command,
+          recovery_turn_direction < 0 ? LINE_ACTION_SEARCH_LEFT
+                                      : LINE_ACTION_SEARCH_RIGHT);
+      DriveBase_SetSideCps(recovery_turn_direction < 0
+                          ? -TRACKING_SEARCH_TURN_CPS : TRACKING_SEARCH_TURN_CPS,
+                          recovery_turn_direction < 0
+                          ? TRACKING_SEARCH_TURN_CPS : -TRACKING_SEARCH_TURN_CPS);
+      return command->action;
     }
     return LINE_ACTION_STOP;
   }
@@ -573,7 +543,7 @@ LineTrackingAction line_tracking_compute(const LineTrackingReading *reading,
   if (recovery_state == LINE_RECOVERY_STOPPED)
   {
     command_stop(command);
-    /* Exhausted/ambiguous recovery is latched until an explicit mode reset. */
+    /* Only a drive fault or the whole-episode watchdog requires mode reset. */
     return LINE_ACTION_STOP;
   }
 
@@ -603,10 +573,13 @@ LineTrackingAction line_tracking_compute(const LineTrackingReading *reading,
         recovery_turn_direction = 0;
       recovery_episode_active = 1U;
       recovery_episode_started_ms = now;
-      recovery_used_mdeg = 0L;
-      recovery_state = recovery_turn_direction != 0
-                     ? LINE_RECOVERY_WAIT_SEARCH
-                     : LINE_RECOVERY_STOPPED;
+      recovery_leg_duration_ms = recovery_turn_direction != 0
+                               ? TRACKING_SEARCH_FIRST_LEG_MS
+                               : TRACKING_SEARCH_PROBE_LEG_MS;
+      /* No hint is uncertainty, not a stop condition. Start a short left
+         probe, then alternate increasingly long legs if no sensor responds. */
+      if (recovery_turn_direction == 0) recovery_turn_direction = -1;
+      recovery_state = LINE_RECOVERY_WAIT_SEARCH;
       recovery_center_candidate = 0U;
       recovery_state_started_ms = now;
       return LINE_ACTION_STOP;

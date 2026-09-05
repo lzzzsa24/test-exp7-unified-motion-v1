@@ -159,8 +159,7 @@ void LineTrackingLiftTest_Run(void)
     fail_mask |= LIFT_TEST_FAIL_INITIAL_FORWARD;
   }
 
-  /* All white starts the bounded four-wheel left search. Keep the synthetic
-     outer phase short enough to capture within the 85-degree travel budget. */
+  /* All white starts a four-wheel speed-controlled left search. */
   run_phase(0x00U, LIFT_TEST_LOST_SEARCH_MS, 0U, &lost);
   if (lost.search_samples == 0U)
   {
@@ -168,7 +167,7 @@ void LineTrackingLiftTest_Run(void)
   }
 
   WheelEncoder_GetCounts(&outer_start);
-  /* X2 is left outer only. It must not release EncoderTurn or go forward. */
+  /* X2 is left outer only. It must retain recovery ownership, not go forward. */
   run_phase(0x02U, LIFT_TEST_OUTER_ONLY_MS, 1U, &outer);
   WheelEncoder_GetCounts(&outer_end);
   if (outer.valid_samples != 0U)

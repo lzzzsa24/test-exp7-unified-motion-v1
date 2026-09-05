@@ -174,7 +174,7 @@ try {
             }
             elseif (-not [string]::IsNullOrWhiteSpace($candidateHash) -and
                     $actualHash -eq $candidateHash) {
-                Write-Result "OK" ("Local {0} matches the recorded unflashed candidate; the board still uses the separate flashed hash." -f $kind.ToUpperInvariant())
+                Write-Result "OK" ("Local {0} matches the recorded candidate; the last programmer-verified image has the separate flashed hash. Check shared state for later user-reported flashing." -f $kind.ToUpperInvariant())
             }
             else {
                 Write-Result "WARN" ("Local {0} differs from the flashed image. This can be valid after an unflashed rebuild. expected={1} actual={2}" -f $kind.ToUpperInvariant(), $expectedHash, $actualHash)
