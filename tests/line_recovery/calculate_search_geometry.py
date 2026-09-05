@@ -107,7 +107,7 @@ def main():
     }
     recovery_text = (ROOT / "Core/Src/line_recovery.c").read_text(encoding="utf-8-sig")
     report["local_recovery_wheel_travel_limits_not_chassis_distance"] = {}
-    for name in ("BACKTRACK_COUNTS", "PROBE_COUNTS", "EDGE_COUNTS", "ROLLBACK_LIMIT"):
+    for name in ("BACKTRACK_COUNTS", "PROBE_COUNTS", "EDGE_COUNTS", "ROLLBACK_LIMIT", "COARSE_MARGIN", "MOTION_MINIMUM"):
         match = re.search(r"^#define\s+" + name + r"\s+MM_COUNTS\((\d+)\)",
                           recovery_text, re.MULTILINE)
         if not match:
@@ -121,6 +121,14 @@ def main():
         name: literal("Core/Src/line_recovery.c", name)
         for name in ("EPISODE_TIMEOUT_MS", "MOVE_TIMEOUT_MS", "PROBE_TIMEOUT_MS", "EDGE_TIMEOUT_MS")
     }
+    limits = report["local_recovery_wheel_travel_limits_not_chassis_distance"]
+    report["blind_scan_stages"] = [
+        {"stage": stage,
+         "wheel_counts": stage * limits["PROBE_COUNTS"]["counts"],
+         "timeout_ms": stage * report["local_recovery_timeouts_ms"]["PROBE_TIMEOUT_MS"]}
+        for stage in range(1, literal("Core/Src/line_recovery.c", "MAX_PROBES") + 1)
+    ]
+    report["recovery_uses_exact_position_moves"] = False
     pose = (args.dx_mm, args.dy_mm, args.angle_deg)
     if any(v is not None for v in pose):
         if not all(v is not None for v in pose):
