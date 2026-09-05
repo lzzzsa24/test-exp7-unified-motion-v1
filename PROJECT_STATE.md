@@ -11,22 +11,22 @@ or physical test.
 state_schema_version: 1
 state_updated_at: 2026-09-05
 integration_branch: feature/line-reacquire-lock
-repository_head_at_update: 045815b
-latest_code_commit: 0d31f10
-flashed_source_commit: 0d31f10
-flash_record_commit: 045815b
-deployed_tag: deployed/2026-09-05-buzzer-gpio-fix
+repository_head_at_update: 232c1cb
+latest_code_commit: 240d612
+flashed_source_commit: 240d612
+flash_record_commit: 232c1cb
+deployed_tag: deployed/2026-09-05-line-search-axle-balance
 formal_bin_path: manual-build-unified-motion/exp7_unified_motion.bin
 formal_hex_path: manual-build-unified-motion/exp7_unified_motion.hex
-formal_bin_size_bytes: 63816
-flashed_bin_sha256: F153C4F39ACBA75A8B48C61C60BE9D1931DDB284B82AA7AA1CD8445053EFB557
-flashed_hex_sha256: E20FBC7F4C5FCE9ACD42F8B0B20EBF16AB7561F1425FF79190802055D25B48D0
-ground_test_status: buzzer_gpio_fix_flashed_audio_check_pending
+formal_bin_size_bytes: 63812
+flashed_bin_sha256: 0EBFFD57CC158FBA42CFD5A5A945DA63B8F3E752E39DE9F29A408121C76C79A1
+flashed_hex_sha256: F1C12AE67500F61DE9939AFEA6818219DBC0159ADA3E634FDD08F3F6864A3E2B
+ground_test_status: axle_balance_flashed_ground_test_pending_buzzer_passed
 k210_status: removed
-candidate_source_commit: 0d31f10
-candidate_bin_size_bytes: 63816
-candidate_bin_sha256: F153C4F39ACBA75A8B48C61C60BE9D1931DDB284B82AA7AA1CD8445053EFB557
-candidate_hex_sha256: E20FBC7F4C5FCE9ACD42F8B0B20EBF16AB7561F1425FF79190802055D25B48D0
+candidate_source_commit: 240d612
+candidate_bin_size_bytes: 63812
+candidate_bin_sha256: 0EBFFD57CC158FBA42CFD5A5A945DA63B8F3E752E39DE9F29A408121C76C79A1
+candidate_hex_sha256: F1C12AE67500F61DE9939AFEA6818219DBC0159ADA3E634FDD08F3F6864A3E2B
 user_reported_flash: tool_verified_current_candidate
 ```
 
@@ -38,23 +38,23 @@ checker requires the anchor to remain an ancestor and prints the live HEAD.
 
 - Repository: `F:\myproject\jidian\project\test-exp7-unified-motion-v1`
 - Integration branch: `feature/line-reacquire-lock`
-- Latest firmware source commit: `0d31f10` (`Initialize buzzer GPIO in integrated startup`), now flashed. It retains adaptive line recovery and the IR centre-key audio change.
-- Flash/readback record: `045815b` (`Record buzzer GPIO fix firmware flash`).
+- Latest firmware source commit: `240d612` (`Add search-only front rear wheel speed comparison`), now flashed. It retains the buzzer GPIO fix, adaptive line recovery and IR centre-key audio.
+- Flash/readback record: `232c1cb` (`Record axle-balance search firmware flash`).
 - The formal BIN above was rebuilt from the clean integration checkout, then
   written through the STM32 ROM bootloader on USB-SERIAL CH340K COM11 at
   57600 baud. Selective erase covered 32 firmware pages, preserved the final
-  calibration page, wrote and read back 63816 bytes with `VERIFY OK`, and
+  calibration page, wrote and read back 63812 bytes with `VERIFY OK`, and
   completed `GO OK: 0x08000000`.
 - Build products under `manual-build-*` are intentionally ignored by Git. A
   different computer must rebuild the named source commit rather than assume
   the artifact was transferred.
 - Current formal BIN/HEX were built in this integration checkout from
-  `0d31f10`. The preceding adaptive-search build remains under
+  `240d612`. The preceding adaptive-search build remains under
   `manual-build-adaptive-line-search`.
   Previous isolated candidates remain under the validation directory.
-- Immediate rollback tag: `rollback/2026-09-05-before-buzzer-gpio-fix`
-  points to `2a7a5d5`. The earlier adaptive-search rollback and build copies
-  remain available.
+- Immediate rollback tag: `rollback/2026-09-05-before-axle-balance`
+  points to `f9c05d6`. The buzzer GPIO fix and earlier adaptive-search rollback
+  points remain available.
 
 ## Current mode map
 
@@ -98,6 +98,12 @@ The deployed `6f32f48` implementation changes KEY1/KEY2 recovery as follows:
   or a DriveBase fault still stops the car; stop/reselect a mode to retry.
 - Mode reset and a zero base-speed command cancel directly owned search/brake.
   KEY1's never-seen-line forward policy and normal on-line steering remain.
+- Commit `240d612` changes only lost-line search wheel allocation: front wheels
+  retain 3600 CPS magnitude while rear wheels use 2160 CPS (60 percent), with
+  left/right commands mirrored. Normal on-line steering and capture remain at
+  equal front/rear targets. This is an uncalibrated ground experiment intended
+  to move the apparent rotation centre rearward; encoders cannot prove chassis
+  pivot position.
 
 ## Current infrared-remote audio behavior
 
@@ -118,8 +124,9 @@ The deployed `6f32f48` implementation changes KEY1/KEY2 recovery as follows:
 - Existing stop/fault, encoder, ultrasonic and bypass warning arbitration can
   immediately cancel this lower-priority audio.
 - The serial `b` command remains an equivalent one-shot diagnostic entry.
-- The fixed firmware is flashed and read back, but audible output from the
-  physical buzzer still requires user confirmation.
+- After flashing `0d31f10`, the user short-pressed the intended sound button
+  and explicitly confirmed audible output (`响了`). The same fix remains in
+  deployed `240d612`.
 
 ## Confirmed hardware facts
 
@@ -136,22 +143,21 @@ The deployed `6f32f48` implementation changes KEY1/KEY2 recovery as follows:
 
 | Evidence level | Current result | Scope |
 |---|---|---|
-| computer build/link | passed | formal `0d31f10`; BIN is 63816 bytes; hashes match the recorded candidate and flashed fields |
-| host regression | passed | real line controller with mocked HAL/DriveBase; fresh/unknown direction, widening reversal, opposite-sensor correction, continuation past old limits, capture/brake ownership, watchdog across retries, faults, mode reset and tick rollover; MSVC /W4 /WX |
-| flash/readback/GO | passed | COM11 at 57600 baud; 32-page selective erase; calibration page preserved; 63816-byte write and readback; `VERIFY OK`; `GO OK` |
-| physical buzzer | pending | PG12 initialization fix is deployed; press the remote centre/sound button in STOP mode to confirm audible output |
+| computer build/link | passed | integrated formal `240d612`; BIN is 63812 bytes; buzzer fix retained |
+| host regression | passed | rear=60 and equal-axle rear=100 profiles both pass axle targets, on-line isolation, recovery, capture, watchdog, faults, reset and tick rollover; MSVC /W4 /WX |
+| flash/readback/GO | passed | COM11 at 57600 baud; 32-page selective erase; calibration page preserved; 63812-byte write and readback; `VERIFY OK`; `GO OK` |
+| physical buzzer | passed | user explicitly confirmed `响了` after the PG12 initialization fix; fix retained in current firmware |
 | wheels off ground | not performed this turn | diagnostic image compilation is not a lifted-wheel test |
-| ground driving | current firmware untested | prior candidate sometimes stopped on line loss; do not transfer that result to deployed `6f32f48` |
+| ground driving | current axle-balance firmware untested | rear-wheel 60-percent search allocation requires same-surface comparison; do not infer pivot movement from the build |
 
 ## Open issue and next safe step
 
-The buzzer GPIO fix, formal build, host regression, flash, readback verification
-and GO are complete. First short-press the remote centre/sound button while the
-car remains in STOP. If it is still silent, send serial `b`: this distinguishes
-an unmatched remote key from a remaining buzzer hardware/output issue. Physical
-audio and ground-driving behavior remain unverified. Subsequent line checks
-should still cover loss with no direction hint, acute corners, misleading
-initial direction, and capture after a reverse sweep.
+The axle-balance integration, formal build, both host regression profiles,
+flash, readback verification and GO are complete. Physical buzzer output is
+confirmed. Ground-test lost-line search in both directions and observe whether
+the apparent rotation centre moves rearward without excessive translation or
+loss of capture. The 60-percent rear target is experimental; use the immediate
+rollback point if it performs worse than the equal-axle version.
 
 ## Update protocol
 
