@@ -210,7 +210,24 @@ static void test_real_white_search(void)
   }
   assert(spun && ms>1000 && ms<8100 && !DriveBase_GetFaultMask());
   for(i=0;i<4;++i) assert(pins[i]==0);
-  puts("PASS: real all-white recovery stays in speed mode and ends without position timeout/sync faults");
+  /* The stopped car must still sample a returned middle line, debounce it,
+     and hand real motor ownership back through slow capture to normal drive. */
+  white.x1_black=white.x3_black=1;
+  for(ms=0;ms<700;++ms)
+  {
+    for(i=0;i<4;++i) counts[i]+=pins[i]>0?3:(pins[i]<0?-3:0);
+    ++tick; DriveBase_Task(tick);
+    line_tracking_compute(&white,3000,&output);
+    if(output.valid)
+    {
+      if(!output.left_cps && !output.right_cps) DriveBase_Stop(DRIVE_STOP_COAST);
+      else DriveBase_SetSideCps(output.left_cps,output.right_cps);
+    }
+    assert(!DriveBase_GetFaultMask());
+    if(ms<80) for(i=0;i<4;++i) assert(pins[i]==0);
+  }
+  assert(output.left_cps==5273 && output.right_cps==5273);
+  puts("PASS: real all-white stop -> stationary line debounce -> slow capture -> normal, no position/fault bypass");
 }
 int main(void)
 {

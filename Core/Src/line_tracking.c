@@ -40,6 +40,7 @@ typedef enum
   LINE_RECOVERY_NORMAL = 0U,
   LINE_RECOVERY_ACTIVE,
   LINE_RECOVERY_SETTLE,
+  LINE_RECOVERY_WAIT_LINE,
   LINE_RECOVERY_STOPPED
 } LineRecoveryState;
 
@@ -47,11 +48,13 @@ static LineRecoveryState recovery_state;
 static uint32_t recovery_state_started_ms;
 static uint8_t settle_center_valid;
 static uint32_t settle_center_since;
+static uint8_t capture_from_wait;
 
 #define TRACKING_HINT_CONFIRM_MS               20U
 #define TRACKING_HINT_MAX_AGE_MS              200U
 #define TRACKING_HINT_CENTER_CLEAR_MS          80U
 #define TRACKING_REACQUIRE_SETTLE_MS         500U
+#define TRACKING_CAPTURE_TIMEOUT_MS         800U
 #define TRACKING_MIN_INNER_PWM             2200
 #define TRACKING_MIN_OUTER_PWM             3000
 #define TRACKING_SETTLE_INNER_PWM           2200
@@ -151,6 +154,27 @@ static void command_release_to_drive(LineTrackingCommand *command,
   command->valid = 0U;
 }
 
+static void recovery_stop(LineRecoveryStopReason reason)
+{
+  LineRecovery_Stop(reason);
+  settle_center_valid = 0U;
+  capture_from_wait = 0U;
+  switch (reason)
+  {
+    case LINE_REC_STOP_SEARCH_TIMEOUT:
+    case LINE_REC_STOP_SCAN_LIMIT:
+    case LINE_REC_STOP_RETURN_REJECTED:
+    case LINE_REC_STOP_RETURN_TIMEOUT:
+    case LINE_REC_STOP_CAPTURE_TIMEOUT:
+    case LINE_REC_STOP_REJOIN_LOST:
+      recovery_state = LINE_RECOVERY_WAIT_LINE;
+      break;
+    default:
+      recovery_state = LINE_RECOVERY_STOPPED;
+      break;
+  }
+}
+
 static uint8_t read_black(GPIO_TypeDef *port, uint16_t pin)
 {
   return HAL_GPIO_ReadPin(port, pin) == GPIO_PIN_RESET ? 1U : 0U;
@@ -229,6 +253,7 @@ void line_tracking_reset(void)
   LineRecovery_Reset();
   settle_center_valid = 0U;
   settle_center_since = HAL_GetTick();
+  capture_from_wait = 0U;
   line_has_been_seen = 0U;
   predicted_turn_direction = 0;
   direction_candidate = 0;
@@ -334,10 +359,10 @@ LineTrackingAction line_tracking_compute(const LineTrackingReading *reading,
     update_direction_hint(reading, active_count, now);
     LineRecovery_Record(reading, now);
   }
-  if (recovery_state != LINE_RECOVERY_NORMAL && LineRecovery_Expired(now))
+  if (DriveBase_GetFaultMask() != 0U)
   {
-    LineRecovery_Reset();
-    recovery_state = LINE_RECOVERY_STOPPED;
+    recovery_stop(LINE_REC_STOP_DRIVE_FAULT);
+    return LINE_ACTION_STOP;
   }
   if (recovery_state == LINE_RECOVERY_ACTIVE)
   {
@@ -347,17 +372,37 @@ LineTrackingAction line_tracking_compute(const LineTrackingReading *reading,
       recovery_state = LINE_RECOVERY_SETTLE;
       recovery_state_started_ms = now;
       settle_center_valid = 0U;
+      capture_from_wait = 0U;
       command_stop(command);
     }
     else if (result == LINE_RECOVERY_FAILED)
     {
-      recovery_state = LINE_RECOVERY_STOPPED;
+      recovery_stop(LineRecovery_GetStopReason());
       command_stop(command);
     }
     return command->action;
   }
   if (recovery_state == LINE_RECOVERY_STOPPED)
   {
+    command_stop(command);
+    return LINE_ACTION_STOP;
+  }
+  if (recovery_state == LINE_RECOVERY_WAIT_LINE)
+  {
+    /* Budget exhaustion is stationary listening, not a new blind-search
+       episode. Outer-only or wide-crossing input cannot restart the car. */
+    if (center_visible && !(reading->x2_black && reading->x4_black))
+    {
+      if (!settle_center_valid) { settle_center_valid = 1U; settle_center_since = now; }
+      if (now - settle_center_since >= TRACKING_HINT_CENTER_CLEAR_MS)
+      {
+        recovery_state = LINE_RECOVERY_SETTLE;
+        recovery_state_started_ms = now;
+        settle_center_valid = 0U;
+        capture_from_wait = 1U;
+      }
+    }
+    else settle_center_valid = 0U;
     command_stop(command);
     return LINE_ACTION_STOP;
   }
@@ -371,6 +416,13 @@ LineTrackingAction line_tracking_compute(const LineTrackingReading *reading,
     {
       command_set_pwm(command, base_speed, base_speed, LINE_ACTION_FORWARD);
       return LINE_ACTION_FORWARD;
+    }
+    if (recovery_state == LINE_RECOVERY_SETTLE &&
+        (capture_from_wait || LineRecovery_Expired(now)))
+    {
+      /* A failed rejoin must not renew the spent blind-motion budget. */
+      recovery_stop(LINE_REC_STOP_REJOIN_LOST);
+      return LINE_ACTION_STOP;
     }
     if (recovery_state == LINE_RECOVERY_NORMAL)
     {
@@ -387,6 +439,13 @@ LineTrackingAction line_tracking_compute(const LineTrackingReading *reading,
   }
   if (recovery_state == LINE_RECOVERY_SETTLE)
   {
+    /* Stationary-confirmed line acquisition has its own bounded interval.
+       An old search deadline must not stop a successfully rejoined line. */
+    if (now - recovery_state_started_ms >= TRACKING_CAPTURE_TIMEOUT_MS)
+    {
+      recovery_stop(LINE_REC_STOP_CAPTURE_TIMEOUT);
+      return LINE_ACTION_STOP;
+    }
     if (center_visible && !(reading->x2_black && reading->x4_black))
     {
       if (!settle_center_valid) { settle_center_valid = 1U; settle_center_since = now; }

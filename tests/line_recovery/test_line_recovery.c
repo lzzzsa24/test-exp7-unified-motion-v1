@@ -5,6 +5,7 @@
 #include "main.h"
 #include "line_tracking.h"
 #include "line_search_model.h"
+#include "line_recovery.h"
 #include "drive_base.h"
 #include "wheel_encoder.h"
 typedef struct { char kind; int32_t cps[4], origin[4], maximum; uint32_t start,end; } Leg;
@@ -139,7 +140,18 @@ int main(void)
         for(w=0;w<4;++w) assert(abs32(next->origin[w]-p->origin[w])<=56);
       }
     }
-    hold(5,100); assert(!output.left_cps);
+    /* Exhaustion is stationary listening: no repeated blind search, and
+       neither outer-only, wide crossing nor brief noise can restart it. */
+    assert(LineRecovery_GetStopReason()==LINE_REC_STOP_SCAN_LIMIT ||
+           LineRecovery_GetStopReason()==LINE_REC_STOP_SEARCH_TIMEOUT);
+    {
+      unsigned before=leg_count;
+      hold(0,5000); hold(2,200); hold(15,200);
+      hold(5,50); sample(0,10); hold(5,70);
+      assert(!output.left_cps && !output.right_cps && before==leg_count);
+      hold(5,30); assert(output.left_cps>0 && output.right_cps>0 && output.left_cps<=2400);
+      hold(5,550); assert(output.left_cps>2400 && LineRecovery_GetStopReason()==LINE_REC_STOP_NONE);
+    }
 
     /* Unequal wheel response may leave coarse error; it must not trigger
        wheel-by-wheel correction or position synchronization faults. */
@@ -152,6 +164,7 @@ int main(void)
     reset(0,(uint8_t)smooth); wait_leg('R',1,0);
     gain[0]=gain[1]=gain[2]=gain[3]=10; wait_stop();
     assert(!nth('P',2) && !telemetry.fault_mask);
+    assert(LineRecovery_GetStopReason()==LINE_REC_STOP_RETURN_TIMEOUT);
     reset((uint8_t)forward,(uint8_t)smooth); hold(5,300);
     for(i=0;i<4;++i) counts[i]+=1000;
     sample(0,10); wait_leg('B',1,0); wait_leg('P',1,0);
@@ -182,15 +195,21 @@ int main(void)
     /* Blocked wheel: stop locally instead of repeating blind reversals. */
     reset(0,(uint8_t)smooth); blocked=1; wait_leg('P',1,0); wait_stop();
     assert(!nth('P',2) && !telemetry.fault_mask);
+    assert(LineRecovery_GetStopReason()==LINE_REC_STOP_NO_MOTION);
+    blocked=0; hold(5,600); assert(!output.left_cps);
     /* Real reported 1/5/8 fault classes remain latched; no clear-fault API exists. */
     for(i=0;i<3;++i)
     {
       reset(0,(uint8_t)smooth); wait_leg('P',1,0);
       telemetry.fault_mask=(uint8_t)(i==0?1:(i==1?16:128)); sample(0,10);
       assert(output.valid && !output.left_cps); hold(5,100); assert(!output.left_cps && telemetry.fault_mask);
+      assert(LineRecovery_GetStopReason()==LINE_REC_STOP_DRIVE_FAULT);
+      telemetry.fault_mask=0; hold(5,600); assert(!output.left_cps);
     }
     reset(0,(uint8_t)smooth); wait_leg('P',1,0); counts[0]+=10000; sample(0,10);
     assert(output.valid && !output.left_cps);
+    assert(LineRecovery_GetStopReason()==LINE_REC_STOP_ENCODER_RANGE);
+    hold(5,600); assert(!output.left_cps);
     /* Capture/retry must retain the original episode deadline. */
     reset((uint8_t)forward,(uint8_t)smooth); hold(5,300);
     {
@@ -198,11 +217,37 @@ int main(void)
       sample(0,10); wait_leg('B',1,0); hold(5,150); assert(output.left_cps>0);
       sample(0,10); tick=lost+8001; sample(0,0); assert(output.valid && !output.left_cps);
     }
+    /* A line captured at 7.7 s gets its own 500-800 ms low-speed interval. */
+    reset((uint8_t)forward,(uint8_t)smooth); hold(5,300);
+    {
+      uint32_t lost=tick+10;
+      sample(0,10); wait_leg('B',1,0);
+      tick=lost+7700; sample(5,0); hold(5,650);
+      assert(output.left_cps>2400 && output.left_cps==output.right_cps);
+      assert(LineRecovery_GetStopReason()==LINE_REC_STOP_NONE);
+    }
+    /* A line first seen after the deadline can be reacquired while stopped.
+       Losing it again before commit cannot renew blind-search time/counters. */
+    reset((uint8_t)forward,(uint8_t)smooth); hold(5,300);
+    {
+      uint32_t lost=tick+10; unsigned before;
+      sample(0,10); wait_leg('B',1,0);
+      tick=lost+8001; sample(5,0); assert(!output.left_cps);
+      hold(5,120); assert(output.left_cps>0 && output.left_cps<=2400);
+      sample(0,10); before=leg_count; hold(0,1000);
+      assert(!output.left_cps && before==leg_count);
+      assert(LineRecovery_GetStopReason()==LINE_REC_STOP_REJOIN_LOST);
+    }
+    /* Unstable capture cannot keep low-speed motion alive indefinitely. */
+    reset(0,(uint8_t)smooth); wait_leg('P',1,0); sample(5,10); hold(5,150);
+    hold(2,850); assert(!output.left_cps && !output.right_cps);
+    assert(LineRecovery_GetStopReason()==LINE_REC_STOP_CAPTURE_TIMEOUT);
     reset((uint8_t)forward,(uint8_t)smooth); hold(5,300); sample(0,10); wait_leg('B',1,0);
     line_tracking_reset(); assert(telemetry.mode==DRIVE_BASE_STOPPED);
   }
   reset(1,1); sample(0,10); assert(output.left_cps>0);
   tick=UINT32_MAX-30; reset(0,1); wait_leg('P',1,0); wait_stop();
+  hold(5,200); assert(output.left_cps>0);
   printf("PASS CPS=%ld: continuous retreat, widening scans, coarse returns, outer/middle capture, no position API, faults, watchdog, wrap\n",(long)LINE_SEARCH_TARGET_CPS);
   return 0;
 }
