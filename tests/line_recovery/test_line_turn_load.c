@@ -99,6 +99,90 @@ static DriveBaseTelemetry trace_line_curve(uint8_t assist)
   assert(!t.fault_mask);
   return t;
 }
+static void test_position_coast_handoff(int32_t direction)
+{
+  DrivePositionCommand move={{-316,-316,-316,-316},{2493,2493,2493,2493},1800,12,DRIVE_STOP_COAST};
+  int32_t zero[4]={0}, travel[4]={-150,-20,-20,-20};
+  DriveBaseTelemetry t;
+  unsigned i;
+  for(i=0;i<4;++i) { move.delta_counts[i]*=direction; travel[i]*=direction; }
+  reset();
+  assert(DriveBase_StartPositionMove(&move));
+  sample(zero);
+  assert(pins[0]*direction<0 && pins[1]*direction<0);
+  sample(travel); /* M1 has entered the <180-count pulse zone. */
+  DriveBase_GetTelemetry(&t);
+  printf("position pulse handoff: M1 remaining=%ld PWM=%d\n",
+         (long)t.position_remaining_counts[0],pins[0]);
+  fflush(stdout);
+  assert(pins[0]==0); /* No continuous torque during pulse settling. */
+  assert(pins[1]*direction<0 && pins[2]*direction<0 && pins[3]*direction<0);
+  /* A coasting wheel keeps moving briefly. It must remain unpowered while
+     the pulse scheduler waits for stationary counts, not relaunch at once. */
+  for(i=0;i<30;++i)
+  {
+    counts[0]-=direction;
+    ++tick; DriveBase_Task(tick);
+    assert(!pins[0] && !DriveBase_GetFaultMask());
+  }
+  for(i=0;i<10;++i) { ++tick; DriveBase_Task(tick); assert(!pins[0]); }
+  /* The other wheels catch up; until then the existing progress synchronizer
+     correctly holds M1 even though its coast guard has elapsed. */
+  counts[1]=counts[2]=counts[3]=counts[0];
+  /* Once coast/stability guards elapse, a bounded pulse can actually start. */
+  for(i=0;i<30 && pins[0]==0;++i) { ++tick; DriveBase_Task(tick); }
+  assert(pins[0]*direction<0 && !DriveBase_GetFaultMask());
+  assert(DriveBase_RequestPositionStop(DRIVE_STOP_BRAKE));
+  for(i=0;i<200;++i) { ++tick; DriveBase_Task(tick); }
+  assert(!DriveBase_GetFaultMask());
+  assert(DriveBase_GetPositionState()==DRIVE_POSITION_DONE);
+  for(i=0;i<4;++i) assert(pins[i]==0);
+  DriveBase_Stop(DRIVE_STOP_COAST);
+}
+
+static void test_real_retrace_capture(void)
+{
+  DriveBaseTelemetry t;
+  LineTrackingCommand output={0};
+  LineTrackingReading reading={1,0,1,0};
+  uint8_t saw_position=0, found=0;
+  uint32_t found_ms=0;
+  unsigned ms,i;
+  line_tracking_reset(); reset();
+  line_tracking_set_no_line_forward(0);
+  line_tracking_set_smooth_mode(0);
+  /* Deliberately simple PWM-to-count plant: checks real state-machine
+     ownership through loss/retrace/capture, not chassis slip or stopping distance. */
+  for(ms=0;ms<2400;++ms)
+  {
+    for(i=0;i<4;++i) counts[i]+=pins[i]>0?4:(pins[i]<0?-4:0);
+    ++tick; DriveBase_Task(tick); DriveBase_GetTelemetry(&t);
+    assert(!t.fault_mask);
+    if(ms>=300 && !found)
+    {
+      reading.x1_black=reading.x3_black=0;
+      if(t.mode==DRIVE_BASE_POSITION)
+      {
+        saw_position=1;
+        if(absolute(t.position_moved_counts[0])>=20)
+        { found=1; found_ms=tick; }
+      }
+    }
+    if(found) reading.x1_black=reading.x3_black=1;
+    line_tracking_compute(&reading,3000,&output);
+    if(output.valid)
+    {
+      if(!output.left_cps && !output.right_cps) DriveBase_Stop(DRIVE_STOP_COAST);
+      else DriveBase_SetSideCps(output.left_cps,output.right_cps);
+    }
+    if(found && tick-found_ms>750) break;
+  }
+  assert(saw_position && found && tick-found_ms>750);
+  assert(output.valid && output.left_cps==5273 && output.right_cps==5273);
+  assert(!DriveBase_GetFaultMask());
+  line_tracking_reset(); DriveBase_Stop(DRIVE_STOP_COAST);
+  puts("PASS: real line loss -> position retrace -> middle hit -> brake -> slow capture -> normal");
+}
 int main(void)
 {
   LineTurnLoadState s={0};
@@ -192,6 +276,9 @@ int main(void)
   assert(DriveBase_GetFaultMask() & DRIVE_FAULT_ENCODER_SIGNAL);
 
   tick=UINT32_MAX-200;
+  test_position_coast_handoff(1);
+  test_position_coast_handoff(-1);
+  test_real_retrace_capture();
   (void)trace(2500,-2500,0,1);
   for(i=0;i<4;++i) sample(creep);
   assert(pins[0]<3000);

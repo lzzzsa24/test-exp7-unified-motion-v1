@@ -1114,6 +1114,7 @@ static void control_position_mode(const WheelEncoderCounts *current,
 
   for (motor = 0U; motor < DRIVE_BASE_WHEEL_COUNT; ++motor)
   {
+    uint8_t was_low_mode = position_low_mode[motor];
     controlled_cps[motor] =
         position_command_for_motor(motor, mean_progress, some_complete);
     requested_cps[motor] = controlled_cps[motor];
@@ -1123,6 +1124,24 @@ static void control_position_mode(const WheelEncoderCounts *current,
          (abs_i32(controlled_cps[motor]) < DRIVE_CONTINUOUS_MIN_CPS ||
           abs_i32(position_remaining_counts[motor]) <
               DRIVE_POSITION_PULSE_ZONE_COUNTS)) ? 1U : 0U;
+    if (position_low_mode[motor] != was_low_mode)
+    {
+      /* A change of owner cancels the preceding pulse's response window.
+         Continuous travel after a pulse must not be scored as that pulse. */
+      pulse_active[motor] = 0U;
+      pulse_response_pending[motor] = 0U;
+      if (position_low_mode[motor] != 0U && output_pwm[motor] != 0)
+      {
+        /* The pulse service waits for a stationary wheel before starting.
+           Leaving the old continuous PWM applied here prevents that wait
+           from ever completing and can drive past the return target. */
+        apply_motor_output(motor, 0);
+        pulse_last_observed_count[motor] = count_for_motor(current, motor);
+        pulse_stable_since_ms[motor] = now;
+        pulse_restart_not_before_ms[motor] = now + DRIVE_PULSE_SETTLE_MS +
+            (uint32_t)motor * DRIVE_PULSE_START_STAGGER_MS;
+      }
+    }
   }
 
   update_encoder_fault_inputs(current, delta, elapsed_ms, now);
