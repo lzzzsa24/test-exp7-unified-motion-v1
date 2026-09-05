@@ -5,6 +5,7 @@
 #include <string.h>
 #include "main.h"
 #include "line_tracking.h"
+#include "line_search_model.h"
 #include "drive_base.h"
 
 static uint32_t tick;
@@ -87,20 +88,19 @@ static void reset(uint8_t forward, uint8_t smooth)
 static void hint(unsigned mask) { sample(mask, 1); sample(mask, 25); }
 static void assert_search(int side)
 {
-  int32_t rear_magnitude = 3600L *
-                          (int32_t)LINE_TRACKING_SEARCH_REAR_PERCENT / 100L;
+  int32_t magnitude = LINE_SEARCH_TARGET_CPS;
   assert(!output.valid && telemetry.mode == DRIVE_BASE_SPEED);
   assert(output.action == (side < 0 ? LINE_ACTION_SEARCH_LEFT :
                                       LINE_ACTION_SEARCH_RIGHT));
   assert(telemetry.requested_cps[1] ==
-         (side < 0 ? -rear_magnitude : rear_magnitude));
+         (side < 0 ? -magnitude : magnitude));
   assert(telemetry.requested_cps[3] ==
-         (side < 0 ? rear_magnitude : -rear_magnitude));
+         (side < 0 ? magnitude : -magnitude));
   assert(telemetry.requested_cps[0] == -telemetry.requested_cps[2]);
   assert(telemetry.requested_cps[1] == -telemetry.requested_cps[3]);
-  assert(telemetry.requested_cps[0] == (side < 0 ? -3600 : 3600));
-  assert(side < 0 ? telemetry.requested_cps[1] <= -1800 :
-                   telemetry.requested_cps[1] >= 1800);
+  assert(telemetry.requested_cps[0] == (side < 0 ? -magnitude : magnitude));
+  assert(telemetry.requested_cps[0] == telemetry.requested_cps[1]);
+  assert(telemetry.requested_cps[2] == telemetry.requested_cps[3]);
   assert(side < 0 ? telemetry.requested_cps[0] < 0 :
                    telemetry.requested_cps[0] > 0);
 }
@@ -135,6 +135,24 @@ static void capture(void)
 int main(void)
 {
   unsigned smooth, forward;
+  /* Independent numeric references for the measured 129/129/47 mm chassis
+     and the existing rounded effective track of 338 mm. */
+  assert(VEHICLE_TRACK_WIDTH_MM == 129 && VEHICLE_WHEELBASE_MM == 129 &&
+         VEHICLE_WHEEL_DIAMETER_MM == 47);
+  assert(LINE_SEARCH_EFFECTIVE_TRACK_MM == 338);
+#if LINE_SEARCH_NOMINAL_YAW_MDEG_S == 120000L
+  const uint32_t probe_ms = 362U, first_ms = 1300U;
+  assert(LINE_SEARCH_TARGET_CPS == 2493);
+  assert(LINE_SEARCH_LEG_MS(2400U) == 3466U);
+#elif LINE_SEARCH_NOMINAL_YAW_MDEG_S == 90000L
+  const uint32_t probe_ms = 482U, first_ms = 1733U;
+  assert(LINE_SEARCH_TARGET_CPS == 1870);
+  assert(LINE_SEARCH_LEG_MS(2400U) == 4621U);
+#else
+#error "Add an independent numeric reference for a new test profile"
+#endif
+  assert(LINE_SEARCH_LEG_MS(250U) == probe_ms);
+  assert(LINE_SEARCH_LEG_MS(900U) == first_ms);
   for (smooth = 0; smooth <= 1; ++smooth)
   for (forward = 0; forward <= 1; ++forward)
   {
@@ -156,8 +174,9 @@ int main(void)
     /* No reliable direction must produce exploration, not latched STOP. */
     reset((uint8_t)forward, (uint8_t)smooth);
     hint(4); sample(5, 1); sample(5, 81); start_search(-1);
-    sample(0, 250); finish_reverse(1);
-    sample(0, 500); finish_reverse(-1);
+    sample(0, 250); assert_search(-1);
+    sample(0, probe_ms - 250); finish_reverse(1);
+    sample(0, 2U * probe_ms); finish_reverse(-1);
     reset((uint8_t)forward, (uint8_t)smooth);
     hint(4); sample(15, 1); start_search(-1);
     reset((uint8_t)forward, (uint8_t)smooth);
@@ -186,9 +205,10 @@ int main(void)
     /* An empty leg reverses and widens, rather than ending in STOP. */
     reset((uint8_t)forward, (uint8_t)smooth);
     hint(1); start_search(-1);
-    sample(0, 900); finish_reverse(1);
-    sample(0, 900); assert_search(1);
-    sample(0, 900); finish_reverse(-1);
+    sample(0, 900); assert_search(-1);
+    sample(0, first_ms - 900); finish_reverse(1);
+    sample(0, first_ms); assert_search(1);
+    sample(0, first_ms); finish_reverse(-1);
 
     /* One-frame centre chatter cannot capture while stationary either. */
     reset((uint8_t)forward, (uint8_t)smooth);
@@ -219,7 +239,7 @@ int main(void)
   reset(0, 1); start_search(-1);
   tick = UINT32_MAX - 15;
   reset(0, 1); hint(1); start_search(-1);
-  printf("PASS rear=%u: axle targets, on-line isolation, fresh/unknown direction, widening reversals, sensor correction, acute-turn continuation, capture/brake ownership, watchdog, faults, mode reset, tick rollover\n",
-         (unsigned)LINE_TRACKING_SEARCH_REAR_PERCENT);
+  printf("PASS nominal_yaw=%ld cps=%ld: geometry conversion, symmetric wheel targets, on-line isolation, direction, reversals, capture, watchdog, faults, reset, tick rollover\n",
+         (long)LINE_SEARCH_NOMINAL_YAW_MDEG_S, (long)LINE_SEARCH_TARGET_CPS);
   return 0;
 }

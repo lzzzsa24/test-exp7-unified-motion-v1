@@ -1,45 +1,156 @@
-# Lost-line search axle-speed experiment
+# 丢线搜索：几何模型、参数与实测边界
 
-Start commit: `2a7a5d5611928205137df858b448086f34685821`.
-User observation: the apparent rotation centre remains too far forward during
-lost-line search. Normal on-line cornering is outside this change.
+分支起点 `2a7a5d5`，本次接续 `5106e2d`；后者的寻线文件与已集成
+`240d612` 相同。用户反馈搜索仍偏向右前轮，尚未分别观察左右搜索方向。
+本文件替代此前 60% 后轮配速的试验说明。
 
-Search commands now use `DriveBase_SetWheelCps` with this wheel order:
+## 1. 已有输入及其证据
 
-| Direction | M1 front left | M2 rear left | M3 front right | M4 rear right |
+| 参数 | 数值 | 来源和限制 |
+|---|---:|---|
+| 轮径 D | 47 mm | vehicle_geometry.h，已有尺量记录 |
+| 左右轮距 B | 129 mm | 同上，轮中心距 |
+| 前后轴距 L | 129 mm | 同上，轮中心距 |
+| 每轮转一圈计数 N | 1040 | encoder_turn.c 的既有换算 |
+| 滑移修正 chi | 2.619 | encoder_turn.c 既有值；本次未做落地辨识 |
+| 有效轮距 Be | round(B chi) = 338 mm | 为复用旧模型的数值参数，不是实体宽度 |
+
+实际轮地摩擦、四轮法向载荷、各轮正反转带载响应、车身侧滑速度、
+真实旋转中心均没有本轮测量值。尺寸不能代替这些数据。
+
+## 2. 四轮刚体运动约束
+
+取车身几何中心为原点，x 向前、y 向左，逆时针角速度 Omega 为正。
+四轮接地点坐标（mm）：
+
+| 车轮 | x | y |
+|---|---:|---:|
+| M1 左前 | +64.5 | +64.5 |
+| M2 左后 | -64.5 | +64.5 |
+| M3 右前 | +64.5 | -64.5 |
+| M4 右后 | -64.5 | -64.5 |
+
+车身速度为 (vx, vy, Omega) 时，第 i 轮中心的速度为：
+
+```text
+Vix = vx - Omega * yi        沿车轮滚动方向
+Viy = vy + Omega * xi        横向，固定朝向车轮必须靠侧滑容纳
+```
+
+在不考虑纵向滑移的名义模型中，轮缘速度 ui = Vix，因此：
+
+```text
+u_M1 = u_M2 = vx - Omega * B/2
+u_M3 = u_M4 = vx + Omega * B/2
+```
+
+这里的同侧等速是名义模型约束。若允许纵向滑移，各轮可以不等速，
+但必须另有经过辨识的轮地模型才能预测实际车身运动。不是四轮转速
+任意设置之后，还能同时套用无纵向滑移的公式。
+
+绕几何中心转动时，四轮轨迹半径均为
+sqrt((L/2)^2+(B/2)^2) = 91.217 mm。但电机驱动方向只取纵向分量，
+不能直接把完整轨迹切向速度 Omega * 91.217 当作轮缘滚动速度。
+
+## 3. 为什么 60% 后轮速度不能算作后轴支点控制
+
+真实瞬时旋转中心满足：
+
+```text
+x_ICR = -vy / Omega
+y_ICR =  vx / Omega
+```
+
+若希望绕后轴中点 (-64.5, 0) 转动，则需要
+vx=0、vy=Omega*64.5。此时前轮横向速度为 Omega*129，后轮横向速度为零；
+但纵向目标仍然是左侧两轮 -Omega*64.5，右侧两轮 +Omega*64.5。
+在 120 deg/s 时，车身中心需要约 135.088 mm/s 的横向速度，
+前轮需要约 270.177 mm/s 的横向滑移。这个侧向运动并没有独立的电机控制轴。
+
+后轴支点的前轮轨迹半径 144.226 mm、后轮 64.5 mm，比例 sqrt(5)，
+也不能拿来当作前后电机转速比，因为前轮完整速度向量不沿轮子朝向。
+
+此前 3600/2160 CPS 的前后配速，轮缘速度分别为 511.113/306.668 mm/s；
+每侧相差 204.445 mm/s。对刚体而言，这个差值只能由纵向滑移等因素容纳，
+不能由车身几何刚性运动本身产生。该试验现在撤回，不再声称能计算出后移量。
+
+## 4. 本次可计算的搜索起点
+
+采用扩展差速模型的旧有效轮距 Be，仅用于名义搜索速度换算：
+
+```text
+q = Omega_deg_s * Be * N / (360 * D)
+```
+
+选择 120 deg/s 是降低原搜索速度的工程选择，不是由尺寸唯一推导出的最优值。
+原等速 3600 CPS 在同一旧模型下约为 173.282 deg/s。
+
+| 名义车身角速度 | 不计纵向滑移的 q | 沿用 Be=338 mm 的 q，取整 |
+|---|---:|---:|
+| 60 deg/s | 475.745 CPS | 1247 CPS，低于既有连续运行下限 1412 |
+| 90 deg/s | 713.617 CPS | 1870 CPS，对照配置 |
+| 120 deg/s | 951.489 CPS | 2493 CPS，默认配置 |
+
+默认目标：
+
+| 方向 | M1 | M2 | M3 | M4 |
 |---|---:|---:|---:|---:|
-| Left | -3600 | -2160 | +3600 | +2160 |
-| Right | +3600 | +2160 | -3600 | -2160 |
+| 左搜索 | -2493 | -2493 | +2493 | +2493 |
+| 右搜索 | +2493 | +2493 | -2493 | -2493 |
 
-Units are encoder counts/second. Each axle still has zero mean longitudinal
-target. There is no new forward/reverse bias between the left and right wheels.
-The four motor polarity mappings and DriveBase feedback are unchanged.
+单位 CPS，轮缘速度幅值约 353.946 mm/s。理论上的 120 deg/s 不是实测转速。
+`line_search_model.h` 从尺寸计算目标；编译参数
+`LINE_SEARCH_NOMINAL_YAW_MDEG_S=90000` 可选择 90 deg/s 对照。
+超出原连续转动目标范围 1412～3600 CPS 的配置会编译失败，不做静默截断。
 
-`LINE_TRACKING_SEARCH_REAR_PERCENT` in `line_tracking.h` defaults to 60.
-Compile with 100 to reproduce the previous equal-axle search targets. Supported
-values are 50 through 100; at 50 the rear target magnitude remains 1800 CPS.
-Zero is deliberately not supported: DriveBase zero-speed output coasts instead
-of locking the rear axle. All search entries and restarts share one helper.
+单侧搜索时间按 ceil(旧时间*3600/新CPS) 缩放，保持旧等速模型的名义扫过范围：
 
-This changes wheel travel demand, not measured torque or a specified ground
-pivot. Tyre slip, load and surface determine whether the apparent rotation
-centre moves, and by how much. No geometric claim about a rear-axle pivot is
-made. The 60-percent value is an experiment, not a calibrated improvement.
+| 定时用途 | 原值 | 默认 120 deg/s | 对照 90 deg/s |
+|---|---:|---:|---:|
+| 无方向初始试探 | 250 ms | 362 ms | 482 ms |
+| 有方向首段 | 900 ms | 1300 ms | 1733 ms |
+| 扩大搜索单段上限 | 2400 ms | 3466 ms | 4621 ms |
 
-Normal on-line commands, capture speeds, search-direction logic, reversal
-braking, widening sweep durations and the 8-second watchdog are unchanged.
-The host runner exercises the default and 100-percent configurations, checking
-all four signed targets in both search directions and after reversals/retries,
-as well as restoration of equal-axle commands on capture and normal tracking.
+这些是换向定时，匹配的外侧探头仍可延续搜索，不是转角截止。
+整次恢复的 8 秒看门狗不变，因此低速配置在 8 秒内完成的搜索轮数可能更少。
+70 ms 换向保护、12 ms 捕线确认、250 ms 捕线低速段均不变。
 
-Build and host tests cannot validate chassis motion. The integration task
-should compare 60 and 100 percent on the same surface, load and battery level,
-observing the front and rear of the chassis from above and checking both search
-directions, capture success and unintended translation. If the effect is absent
-or worse, retain 100 rather than interpreting encoder counts as chassis yaw.
+## 5. 为什么“偏向右前轮”还需要辨识
 
-This branch starts at the requested older integration baseline. Later changes
-such as buzzer GPIO initialization are not included in its standalone binary.
-Merge the source commit into the current integration branch and build there;
-integration owns any eventual flashing and physical tests. This task does not
-edit PROJECT_STATE.md or access hardware.
+尺寸和左右镜像指令不包含一个能解释固定右前偏心的非对称参数。
+只有右转明显与左右转都偏同一车轮，是不同的证据；用户本轮还未分别观察。
+不能仅凭“偏右前”就把 M3 判为故障或给它追加某个百分比。
+
+若旋转中心确实在 M3 附近 (+64.5,-64.5)，几何上需要
+vx approximately -Omega*64.5、vy approximately -Omega*64.5。
+这同时涉及前后平移与横向滑移，单纯更改整体角速度不能保证消除它。
+
+集成任务下一次获得授权后，所需最少实测是：
+1. 左、右搜索各一段，记录四轮 requested_cps、measured_cps、output_pwm、
+   fault_mask；保持表面、电量和负载一致。
+2. 同时从上方观察车身几何中心和朝向，区分轮子自转与接地点移动。
+3. 轮速不跟随：检查单轮正反转带载、控制输出是否饱和、编码器方向。
+   轮速已跟随而车身仍偏心：进一步辨识滑移、载荷和真实 ICR。
+4. 没有这些数据，不生成所谓“右前轮精确补偿系数”。
+
+离线工具 `calculate_search_geometry.py` 重算所有尺寸和换算，并支持输入
+一小段转动的车身中心位移 dx/dy（以起始车身坐标表示）和转角来估计等效 ICR。
+它求解 (I-R(theta))*ICR=delta_position；若过程支点变化，结果只是该段等效值。
+只有照片或轮子计数不足以恢复这段车身运动。工具没有串口或电机访问。
+
+## 6. 理论依据、验证与集成
+
+刚体点速度和 ICR 关系是以上独立推导；滑移模型及需要辨识的参数可参考
+[Rabiee & Biswas, A Friction-Based Kinematic Model for Skid-Steer Wheeled Mobile Robots](https://amrl.cs.utexas.edu/papers/icra2019_skid_steer_kinematics.pdf)。
+其扩展差速模型中的 chi 随地面变化，完整运动模型还包含横向速度和不对称项。
+本任务没有把论文中其他车辆的摩擦参数移植到这辆车。
+
+主机回归检查 120/90 两种配置、四轮符号与同侧等幅、调整后的换向时刻、
+方向纠错、捕线接管、故障与超时停车。离线计算自检用合成的中心/后轴/右前
+旋转样例验证 ICR 反解，合成样例不算实车观测。
+
+正常在线转向和通用 DriveBase、motorPWM、vehicle_geometry 不修改。
+此工作树从 2a7a5d5 起步，本次在已交接的 5106e2d 上继续；集成对话已经将
+其等价提交 240d612 合入。只需接续本次新提交，并保留更新的蜂鸣器等修复。
+PROJECT_STATE.md 不修改，板上固件不操作。新参数须由集成对话构建、授权
+烧录并完成实际地面验证后，才能判断偏心是否改善。
