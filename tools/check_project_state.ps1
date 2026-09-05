@@ -119,6 +119,11 @@ try {
     $latest = Resolve-Commit "latest_code_commit" $fields["latest_code_commit"]
     $flashed = Resolve-Commit "flashed_source_commit" $fields["flashed_source_commit"]
     $flashRecord = Resolve-Commit "flash_record_commit" $fields["flash_record_commit"]
+    $candidateText = Get-StateField -Text $stateText -Name "candidate_source_commit"
+    $candidate = $null
+    if (-not [string]::IsNullOrWhiteSpace($candidateText)) {
+        $candidate = Resolve-Commit "candidate_source_commit" $candidateText
+    }
 
     if ($null -ne $anchor) {
         & git merge-base --is-ancestor $anchor $head
@@ -147,9 +152,17 @@ try {
         $relativePath = $fields[$pathField] -replace "/", [IO.Path]::DirectorySeparatorChar
         $artifactPath = Join-Path $repoRoot $relativePath
         $expectedHash = $fields[$hashField].ToUpperInvariant()
+        $candidateHash = Get-StateField -Text $stateText -Name ("candidate_{0}_sha256" -f $kind)
+        if (-not [string]::IsNullOrWhiteSpace($candidateHash)) {
+            $candidateHash = $candidateHash.ToUpperInvariant()
+        }
 
         if ($expectedHash -notmatch "^[0-9A-F]{64}$") {
             Write-Result "ERROR" ("Invalid SHA-256 in {0}." -f $hashField)
+        }
+        elseif (-not [string]::IsNullOrWhiteSpace($candidateHash) -and
+                $candidateHash -notmatch "^[0-9A-F]{64}$") {
+            Write-Result "ERROR" ("Invalid SHA-256 in candidate_{0}_sha256." -f $kind)
         }
         elseif (-not (Test-Path -LiteralPath $artifactPath -PathType Leaf)) {
             Write-Result "WARN" ("Local {0} artifact is absent; rebuild from the recorded source commit: {1}" -f $kind.ToUpperInvariant(), $artifactPath)
@@ -158,6 +171,10 @@ try {
             $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $artifactPath).Hash.ToUpperInvariant()
             if ($actualHash -eq $expectedHash) {
                 Write-Result "OK" ("Local {0} matches the flashed SHA-256." -f $kind.ToUpperInvariant())
+            }
+            elseif (-not [string]::IsNullOrWhiteSpace($candidateHash) -and
+                    $actualHash -eq $candidateHash) {
+                Write-Result "OK" ("Local {0} matches the recorded unflashed candidate; the board still uses the separate flashed hash." -f $kind.ToUpperInvariant())
             }
             else {
                 Write-Result "WARN" ("Local {0} differs from the flashed image. This can be valid after an unflashed rebuild. expected={1} actual={2}" -f $kind.ToUpperInvariant(), $expectedHash, $actualHash)
@@ -170,8 +187,13 @@ try {
     if (Test-Path -LiteralPath $binPath -PathType Leaf) {
         $actualSize = (Get-Item -LiteralPath $binPath).Length
         $expectedSize = [int64]$fields["formal_bin_size_bytes"]
+        $candidateSizeText = Get-StateField -Text $stateText -Name "candidate_bin_size_bytes"
         if ($actualSize -eq $expectedSize) {
-            Write-Result "OK" ("Local BIN size is {0} bytes." -f $actualSize)
+            Write-Result "OK" ("Local BIN size matches the flashed snapshot: {0} bytes." -f $actualSize)
+        }
+        elseif (-not [string]::IsNullOrWhiteSpace($candidateSizeText) -and
+                $actualSize -eq [int64]$candidateSizeText) {
+            Write-Result "OK" ("Local BIN size matches the unflashed candidate: {0} bytes." -f $actualSize)
         }
         else {
             Write-Result "WARN" ("Local BIN size is {0} bytes; flashed snapshot records {1}." -f $actualSize, $expectedSize)
