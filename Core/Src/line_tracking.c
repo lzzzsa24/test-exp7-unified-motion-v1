@@ -129,6 +129,9 @@ static void command_set_pwm(LineTrackingCommand *command,
   if (command == 0) return;
   command->left_cps = DriveBase_EquivalentCpsFromPwm(left_pwm);
   command->right_cps = DriveBase_EquivalentCpsFromPwm(right_pwm);
+  /* Preparing does not own the motors. DriveBase consumes the request only
+     when the caller accepts these exact targets; a speed cap disables it. */
+  DriveBase_PrepareLineTurnAssist(command->left_cps, command->right_cps);
   command->action = action;
   command->valid = 1U;
 }

@@ -4,6 +4,7 @@
 #include "main.h"
 #include "motorPWM.h"
 #include "wheel_encoder.h"
+#include "line_turn_load.h"
 
 #define DRIVE_CONTROL_PERIOD_MS                 20U
 #define DRIVE_TARGET_RAMP_CPS_PER_PERIOD       700L
@@ -119,6 +120,21 @@ static uint8_t pulse_no_response_streak[DRIVE_BASE_WHEEL_COUNT];
 static uint8_t pulse_wrong_direction_streak[DRIVE_BASE_WHEEL_COUNT];
 static uint16_t battery_mv;
 static uint16_t voltage_compensation_permille;
+static uint8_t line_assist_pending, line_assist_active;
+static uint32_t line_assist_prepared_ms, line_assist_accepted_ms;
+static int32_t line_assist_left, line_assist_right;
+static LineTurnLoadState line_load[DRIVE_BASE_WHEEL_COUNT];
+
+static void reset_line_assist(void)
+{
+  uint8_t motor;
+  line_assist_pending = line_assist_active = 0U;
+  for (motor = 0U; motor < DRIVE_BASE_WHEEL_COUNT; ++motor)
+  {
+    line_load[motor].slow_ms = 0U;
+    line_load[motor].extra_pwm = 0;
+  }
+}
 
 /* Direction-specific tables are intentionally separate even where their
    initial values match. Reverse operation has not yet received an equivalent
@@ -380,8 +396,15 @@ static int16_t speed_control_output(uint8_t motor,
   int32_t correction;
   int32_t signed_output;
   int32_t minimum_output;
+  int16_t line_extra;
   int8_t direction = sign_i32(target_cps);
   uint8_t direction_index = direction > 0 ? 1U : 0U;
+
+  line_extra = LineTurnLoad_Update(&line_load[motor],
+      (uint8_t)(drive_mode == DRIVE_BASE_SPEED && line_assist_active &&
+                HAL_GetTick() - line_assist_accepted_ms < 60U &&
+                target_cps == requested_cps[motor]),
+      target_cps, measured_cps[motor], elapsed_ms);
 
   if (target_cps == 0L || elapsed_ms == 0U)
   {
@@ -415,6 +438,9 @@ static int16_t speed_control_output(uint8_t motor,
                          -DRIVE_MAX_CORRECTION_PWM,
                          DRIVE_MAX_CORRECTION_PWM);
   signed_output += correction;
+  /* Keep the target, legacy PI gains and output rails. Only the lagging wheel
+     receives bounded extra effort; saturation still participates in anti-windup. */
+  signed_output += (int32_t)direction * line_extra;
   minimum_output = minimum_continuous_pwm[direction_index][motor];
 
   if (direction > 0)
@@ -460,6 +486,8 @@ static int16_t speed_control_output(uint8_t motor,
 static void clear_motion_targets(void)
 {
   uint8_t motor;
+
+  reset_line_assist();
 
   for (motor = 0U; motor < DRIVE_BASE_WHEEL_COUNT; ++motor)
   {
@@ -1124,6 +1152,7 @@ void DriveBase_Init(void)
   drive_mode = DRIVE_BASE_STOPPED;
   position_state = DRIVE_POSITION_IDLE;
   brake_phase = DRIVE_BRAKE_NONE;
+  reset_line_assist();
   fault_mask = 0U;
   direction_fault_mask = 0U;
   encoder_signal_fault_mask = 0U;
@@ -1160,6 +1189,17 @@ void DriveBase_Init(void)
   coast_all();
 }
 
+void DriveBase_PrepareLineTurnAssist(int32_t left_cps, int32_t right_cps)
+{
+  line_assist_pending = (uint8_t)(left_cps != right_cps &&
+      left_cps != 0L && right_cps != 0L &&
+      left_cps >= -DRIVE_MAX_CPS && left_cps <= DRIVE_MAX_CPS &&
+      right_cps >= -DRIVE_MAX_CPS && right_cps <= DRIVE_MAX_CPS);
+  line_assist_left = left_cps;
+  line_assist_right = right_cps;
+  line_assist_prepared_ms = HAL_GetTick();
+}
+
 void DriveBase_SetWheelCps(int32_t motor1_cps,
                            int32_t motor2_cps,
                            int32_t motor3_cps,
@@ -1169,11 +1209,18 @@ void DriveBase_SetWheelCps(int32_t motor1_cps,
       {motor1_cps, motor2_cps, motor3_cps, motor4_cps};
   uint32_t now = HAL_GetTick();
   uint8_t motor;
+  uint8_t line_claim = (uint8_t)(line_assist_pending &&
+      now - line_assist_prepared_ms <= 20U &&
+      motor1_cps == line_assist_left && motor2_cps == line_assist_left &&
+      motor3_cps == line_assist_right && motor4_cps == line_assist_right);
+
+  line_assist_pending = 0U;
 
   if (fault_mask != 0U || brake_phase != DRIVE_BRAKE_NONE ||
       position_state == DRIVE_POSITION_RUNNING ||
       position_state == DRIVE_POSITION_SETTLING)
   {
+    reset_line_assist();
     return;
   }
   for (motor = 0U; motor < DRIVE_BASE_WHEEL_COUNT; ++motor)
@@ -1197,6 +1244,17 @@ void DriveBase_SetWheelCps(int32_t motor1_cps,
                                        DRIVE_MAX_CPS);
     reset_controller_state(now);
     drive_mode = DRIVE_BASE_SPEED;
+  }
+  if (!line_claim) reset_line_assist();
+  else
+  {
+    if (now - line_assist_accepted_ms >= 60U)
+    {
+      /* A delayed caller cannot revive effort learned before its pause. */
+      reset_line_assist();
+    }
+    line_assist_active = 1U;
+    line_assist_accepted_ms = now;
   }
 }
 
