@@ -1,285 +1,148 @@
-/* USER CODE BEGIN Header */
-/**
-  ******************************************************************************
-  * @file    motorPWM.c
-  * @brief   实验二：四路直流电机 PWM 调速（20 kHz）
-  ******************************************************************************
-  */
-/* USER CODE END Header */
-
+/* YB-DSF01-V1.1 / STM32F103ZE: all motor polarity knowledge lives here.
+ * M1 LF: TIM8 CH2 forward, CH1 reverse; M2 LR: CH4 forward, CH3 reverse.
+ * M3 RF: TIM1 CH1 forward, CH2 reverse; M4 RR: CH3 forward, CH4 reverse.
+ * TIM1 is fully remapped to PE9/11/13/14; TIM8 uses PC6/7/8/9.
+ * 72 MHz / 3600 = 20 kHz. 0/0 on a bridge means coast, not active brake.
+ */
 #include "motorPWM.h"
 #include "main.h"
+#include "line_config.h"
 
-/*
- * STM32F103ZET6 的定时器映射：
- *   TIM8_CH1/2/3/4 -> PC6/PC7/PC8/PC9 -> M1A/M1B/M2A/M2B
- *   TIM1 全重映射 CH1/2/3/4 -> PE9/PE11/PE13/PE14 -> M3A/M3B/M4A/M4B
- * 72 MHz / (3599 + 1) = 20 kHz。
- *
- * 车体安装后，M1/M2 与 M3/M4 的电气正方向相反。
- * 下面将它们统一封装成相同的逻辑方向：调用 forward 时四个轮子都向前。
- */
+static TIM_HandleTypeDef timers[2];
+static int8_t last_sign[2];
+static uint8_t coasting[2];
+static uint32_t coast_at[2];
+static int16_t applied[2];
 
-static TIM_HandleTypeDef htim1_pwm;
-static TIM_HandleTypeDef htim8_pwm;
+/* Measured hardware data, 2026-09-03 wheels lifted. These points are NOT a
+ * ground-speed model. Both polarities retain the same measured PWM mapping. */
+static const uint16_t requested_points[] = {0, 2200, 2400, 3000, 3599};
+static const uint16_t measured_pwm[4][5] = {
+  {0, 2174, 2371, 2962, 3599}, {0, 2208, 2410, 3009, 3599},
+  {0, 2210, 2412, 3018, 3599}, {0, 2208, 2408, 3012, 3599}
+};
 
-/*
- * 2026-09-03 四轮悬空自动标定。原始 PWM=2200/2400/3000 均进行了
- * 多轮独立清零测量。电机在低速区明显非线性，因此不能用一个固定
- * 百分比修正；下面记录三个逻辑 PWM 节点对应的各电机实际 PWM。
- * 只修正功率，不改变经过实车确认的方向映射。
- */
-#define MOTOR1_PWM_AT_2200  2174L
-#define MOTOR1_PWM_AT_2400  2371L
-#define MOTOR1_PWM_AT_3000  2962L
-#define MOTOR2_PWM_AT_2200  2208L
-#define MOTOR2_PWM_AT_2400  2410L
-#define MOTOR2_PWM_AT_3000  3009L
-#define MOTOR3_PWM_AT_2200  2210L
-#define MOTOR3_PWM_AT_2400  2412L
-#define MOTOR3_PWM_AT_3000  3018L
-#define MOTOR4_PWM_AT_2200  2208L
-#define MOTOR4_PWM_AT_2400  2408L
-#define MOTOR4_PWM_AT_3000  3012L
-
-static uint32_t clamp_speed(int16_t speed)
+static uint16_t calibrated(unsigned wheel, uint32_t pwm)
 {
-  if (speed <= 0)
-  {
-    return 0U;
+  unsigned index;
+  if (pwm >= MOTOR_PWM_PERIOD) return MOTOR_PWM_PERIOD;
+  for (index = 1U; index < 5U; ++index) {
+    if (pwm <= requested_points[index]) {
+      uint32_t span = requested_points[index] - requested_points[index - 1U];
+      uint32_t rise = measured_pwm[wheel][index] - measured_pwm[wheel][index - 1U];
+      return (uint16_t)(measured_pwm[wheel][index - 1U] +
+        ((pwm - requested_points[index - 1U]) * rise + span / 2U) / span);
+    }
   }
-
-  if ((uint16_t)speed > MOTOR_PWM_PERIOD)
-  {
-    return MOTOR_PWM_PERIOD;
-  }
-
-  return (uint32_t)speed;
+  return 0U;
 }
 
-static int32_t interpolate_pwm(int32_t value,
-                               int32_t x0,
-                               int32_t y0,
-                               int32_t x1,
-                               int32_t y1)
+static void wheel_write(unsigned wheel, int16_t command)
 {
-  return y0 + ((value - x0) * (y1 - y0) + (x1 - x0) / 2L) /
-              (x1 - x0);
+  unsigned side = wheel / 2U;
+  TIM_HandleTypeDef *timer = &timers[side];
+  uint32_t channel_a = (wheel & 1U) ? TIM_CHANNEL_3 : TIM_CHANNEL_1;
+  uint32_t channel_b = (wheel & 1U) ? TIM_CHANNEL_4 : TIM_CHANNEL_2;
+  int32_t magnitude = command;
+  uint32_t active, inactive;
+  if (magnitude < 0) magnitude = -magnitude;
+  /* Left motors have opposite electrical polarity to the right motors. */
+  active = ((command > 0) == (side != 0U)) ? channel_a : channel_b;
+  inactive = active == channel_a ? channel_b : channel_a;
+  __HAL_TIM_SET_COMPARE(timer, inactive, 0U);
+  __HAL_TIM_SET_COMPARE(timer, active, calibrated(wheel, (uint32_t)magnitude));
 }
 
-static int16_t apply_power_calibration(int16_t speed,
-                                       int32_t pwm_at_2200,
-                                       int32_t pwm_at_2400,
-                                       int32_t pwm_at_3000)
+static void side_write(unsigned side, int16_t command, uint32_t now)
 {
-  int32_t requested = speed;
-  int32_t calibrated;
-
-  if (requested <= 0)
-  {
-    return 0;
+  int8_t sign = command > 0 ? 1 : (command < 0 ? -1 : 0);
+  if (sign == 0 || (sign != last_sign[side] && !coasting[side])) {
+    if (!coasting[side]) coast_at[side] = now;
+    coasting[side] = 1U;
+    command = 0;
+  } else if (sign != last_sign[side] &&
+             now - coast_at[side] < MOTOR_REVERSE_COAST_MS) {
+    command = 0;
+  } else {
+    coasting[side] = 0U;
+    last_sign[side] = sign;
   }
-  if (requested > MOTOR_PWM_PERIOD)
-  {
-    requested = MOTOR_PWM_PERIOD;
-  }
-
-  if (requested <= 2200L)
-  {
-    calibrated = interpolate_pwm(requested, 0L, 0L,
-                                 2200L, pwm_at_2200);
-  }
-  else if (requested <= 2400L)
-  {
-    calibrated = interpolate_pwm(requested, 2200L, pwm_at_2200,
-                                 2400L, pwm_at_2400);
-  }
-  else if (requested <= 3000L)
-  {
-    calibrated = interpolate_pwm(requested, 2400L, pwm_at_2400,
-                                 3000L, pwm_at_3000);
-  }
-  else
-  {
-    calibrated = interpolate_pwm(requested, 3000L, pwm_at_3000,
-                                 MOTOR_PWM_PERIOD, MOTOR_PWM_PERIOD);
-  }
-  return (int16_t)calibrated;
+  wheel_write(side * 2U, command);
+  wheel_write(side * 2U + 1U, command);
+  applied[side] = command;
 }
 
-static void set_compare(TIM_HandleTypeDef *htim, uint32_t channel, int16_t speed)
+void motor_pwm_set_sides(int16_t left, int16_t right, uint32_t now)
 {
-  __HAL_TIM_SET_COMPARE(htim, channel, clamp_speed(speed));
-}
-
-static void configure_pwm_channel(TIM_HandleTypeDef *htim, uint32_t channel)
-{
-  TIM_OC_InitTypeDef sConfigOC = {0};
-
-  sConfigOC.OCMode = TIM_OCMODE_PWM1;
-  sConfigOC.Pulse = 0U;
-  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
-  sConfigOC.OCNPolarity = TIM_OCNPOLARITY_HIGH;
-  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
-  sConfigOC.OCIdleState = TIM_OCIDLESTATE_RESET;
-  sConfigOC.OCNIdleState = TIM_OCNIDLESTATE_RESET;
-
-  if (HAL_TIM_PWM_ConfigChannel(htim, &sConfigOC, channel) != HAL_OK)
-  {
-    Error_Handler();
-  }
-}
-
-static void configure_timer(TIM_HandleTypeDef *htim, TIM_TypeDef *instance)
-{
-  htim->Instance = instance;
-  htim->Init.Prescaler = 0U;
-  htim->Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim->Init.Period = MOTOR_PWM_PERIOD;
-  htim->Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-  htim->Init.RepetitionCounter = 0U;
-  htim->Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
-
-  if (HAL_TIM_PWM_Init(htim) != HAL_OK)
-  {
-    Error_Handler();
-  }
-
-  configure_pwm_channel(htim, TIM_CHANNEL_1);
-  configure_pwm_channel(htim, TIM_CHANNEL_2);
-  configure_pwm_channel(htim, TIM_CHANNEL_3);
-  configure_pwm_channel(htim, TIM_CHANNEL_4);
-}
-
-static void start_pwm_channels(TIM_HandleTypeDef *htim)
-{
-  if (HAL_TIM_PWM_Start(htim, TIM_CHANNEL_1) != HAL_OK ||
-      HAL_TIM_PWM_Start(htim, TIM_CHANNEL_2) != HAL_OK ||
-      HAL_TIM_PWM_Start(htim, TIM_CHANNEL_3) != HAL_OK ||
-      HAL_TIM_PWM_Start(htim, TIM_CHANNEL_4) != HAL_OK)
-  {
-    Error_Handler();
-  }
-}
-
-void motor_pwm_init(void)
-{
-  GPIO_InitTypeDef GPIO_InitStruct = {0};
-
-  __HAL_RCC_AFIO_CLK_ENABLE();
-  __HAL_RCC_GPIOC_CLK_ENABLE();
-  __HAL_RCC_GPIOE_CLK_ENABLE();
-  __HAL_RCC_TIM1_CLK_ENABLE();
-  __HAL_RCC_TIM8_CLK_ENABLE();
-
-  /* TIM1 的四路输出需要完全重映射到 PE9/PE11/PE13/PE14。 */
-  __HAL_AFIO_REMAP_TIM1_ENABLE();
-
-  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
-
-  GPIO_InitStruct.Pin = M1A_Pin | M1B_Pin | M2A_Pin | M2B_Pin;
-  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
-
-  GPIO_InitStruct.Pin = M3A_Pin | M3B_Pin | M4A_Pin | M4B_Pin;
-  HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
-
-  configure_timer(&htim1_pwm, TIM1);
-  configure_timer(&htim8_pwm, TIM8);
-  start_pwm_channels(&htim1_pwm);
-  start_pwm_channels(&htim8_pwm);
-  pwm_motor_stop();
+  if (left > (int16_t)MOTOR_PWM_PERIOD) left = (int16_t)MOTOR_PWM_PERIOD;
+  if (left < -(int16_t)MOTOR_PWM_PERIOD) left = -(int16_t)MOTOR_PWM_PERIOD;
+  if (right > (int16_t)MOTOR_PWM_PERIOD) right = (int16_t)MOTOR_PWM_PERIOD;
+  if (right < -(int16_t)MOTOR_PWM_PERIOD) right = -(int16_t)MOTOR_PWM_PERIOD;
+  side_write(0U, left, now);
+  side_write(1U, right, now);
 }
 
 void pwm_motor_stop(void)
 {
-  set_compare(&htim8_pwm, TIM_CHANNEL_1, 0);
-  set_compare(&htim8_pwm, TIM_CHANNEL_2, 0);
-  set_compare(&htim8_pwm, TIM_CHANNEL_3, 0);
-  set_compare(&htim8_pwm, TIM_CHANNEL_4, 0);
-  set_compare(&htim1_pwm, TIM_CHANNEL_1, 0);
-  set_compare(&htim1_pwm, TIM_CHANNEL_2, 0);
-  set_compare(&htim1_pwm, TIM_CHANNEL_3, 0);
-  set_compare(&htim1_pwm, TIM_CHANNEL_4, 0);
+  motor_pwm_set_sides(0, 0, HAL_GetTick());
 }
 
-void pwm_motor1_forward(int16_t speed)
+int16_t motor_pwm_get_side(unsigned side)
 {
-  set_compare(&htim8_pwm, TIM_CHANNEL_1, 0);
-  set_compare(&htim8_pwm, TIM_CHANNEL_2,
-              apply_power_calibration(speed,
-                                      MOTOR1_PWM_AT_2200,
-                                      MOTOR1_PWM_AT_2400,
-                                      MOTOR1_PWM_AT_3000));
+  return side < 2U ? applied[side] : 0;
 }
 
-void pwm_motor1_backward(int16_t speed)
+void motor_pwm_emergency_stop(void)
 {
-  set_compare(&htim8_pwm, TIM_CHANNEL_1,
-              apply_power_calibration(speed,
-                                      MOTOR1_PWM_AT_2200,
-                                      MOTOR1_PWM_AT_2400,
-                                      MOTOR1_PWM_AT_3000));
-  set_compare(&htim8_pwm, TIM_CHANNEL_2, 0);
+  /* Works from fault handlers without HAL, interrupts or a running tick. */
+  TIM8->BDTR &= ~TIM_BDTR_MOE;
+  TIM1->BDTR &= ~TIM_BDTR_MOE;
+  TIM8->CCR1 = TIM8->CCR2 = TIM8->CCR3 = TIM8->CCR4 = 0U;
+  TIM1->CCR1 = TIM1->CCR2 = TIM1->CCR3 = TIM1->CCR4 = 0U;
 }
 
-void pwm_motor2_forward(int16_t speed)
+void motor_pwm_init(void)
 {
-  set_compare(&htim8_pwm, TIM_CHANNEL_3, 0);
-  set_compare(&htim8_pwm, TIM_CHANNEL_4,
-              apply_power_calibration(speed,
-                                      MOTOR2_PWM_AT_2200,
-                                      MOTOR2_PWM_AT_2400,
-                                      MOTOR2_PWM_AT_3000));
-}
-
-void pwm_motor2_backward(int16_t speed)
-{
-  set_compare(&htim8_pwm, TIM_CHANNEL_3,
-              apply_power_calibration(speed,
-                                      MOTOR2_PWM_AT_2200,
-                                      MOTOR2_PWM_AT_2400,
-                                      MOTOR2_PWM_AT_3000));
-  set_compare(&htim8_pwm, TIM_CHANNEL_4, 0);
-}
-
-void pwm_motor3_forward(int16_t speed)
-{
-  set_compare(&htim1_pwm, TIM_CHANNEL_1,
-              apply_power_calibration(speed,
-                                      MOTOR3_PWM_AT_2200,
-                                      MOTOR3_PWM_AT_2400,
-                                      MOTOR3_PWM_AT_3000));
-  set_compare(&htim1_pwm, TIM_CHANNEL_2, 0);
-}
-
-void pwm_motor3_backward(int16_t speed)
-{
-  set_compare(&htim1_pwm, TIM_CHANNEL_1, 0);
-  set_compare(&htim1_pwm, TIM_CHANNEL_2,
-              apply_power_calibration(speed,
-                                      MOTOR3_PWM_AT_2200,
-                                      MOTOR3_PWM_AT_2400,
-                                      MOTOR3_PWM_AT_3000));
-}
-
-void pwm_motor4_forward(int16_t speed)
-{
-  set_compare(&htim1_pwm, TIM_CHANNEL_3,
-              apply_power_calibration(speed,
-                                      MOTOR4_PWM_AT_2200,
-                                      MOTOR4_PWM_AT_2400,
-                                      MOTOR4_PWM_AT_3000));
-  set_compare(&htim1_pwm, TIM_CHANNEL_4, 0);
-}
-
-void pwm_motor4_backward(int16_t speed)
-{
-  set_compare(&htim1_pwm, TIM_CHANNEL_3, 0);
-  set_compare(&htim1_pwm, TIM_CHANNEL_4,
-              apply_power_calibration(speed,
-                                      MOTOR4_PWM_AT_2200,
-                                      MOTOR4_PWM_AT_2400,
-                                      MOTOR4_PWM_AT_3000));
+  GPIO_InitTypeDef gpio = {0};
+  TIM_OC_InitTypeDef oc = {0};
+  unsigned side;
+  uint32_t channel;
+  __HAL_RCC_AFIO_CLK_ENABLE();
+  __HAL_RCC_GPIOC_CLK_ENABLE();
+  __HAL_RCC_GPIOE_CLK_ENABLE();
+  __HAL_RCC_TIM8_CLK_ENABLE();
+  __HAL_RCC_TIM1_CLK_ENABLE();
+  __HAL_AFIO_REMAP_TIM1_ENABLE();
+  gpio.Mode = GPIO_MODE_AF_PP;
+  gpio.Pull = GPIO_NOPULL;
+  gpio.Speed = GPIO_SPEED_FREQ_HIGH;
+  gpio.Pin = M1A_Pin | M1B_Pin | M2A_Pin | M2B_Pin;
+  HAL_GPIO_Init(GPIOC, &gpio);
+  gpio.Pin = M3A_Pin | M3B_Pin | M4A_Pin | M4B_Pin;
+  HAL_GPIO_Init(GPIOE, &gpio);
+  oc.OCMode = TIM_OCMODE_PWM1;
+  oc.OCPolarity = TIM_OCPOLARITY_HIGH;
+  oc.OCNPolarity = TIM_OCNPOLARITY_HIGH;
+  oc.OCIdleState = TIM_OCIDLESTATE_RESET;
+  oc.OCNIdleState = TIM_OCNIDLESTATE_RESET;
+  oc.OCFastMode = TIM_OCFAST_DISABLE;
+  for (side = 0U; side < 2U; ++side) {
+    TIM_HandleTypeDef *timer = &timers[side];
+    timer->Instance = side == 0U ? TIM8 : TIM1;
+    timer->Init.Prescaler = 0U;
+    timer->Init.CounterMode = TIM_COUNTERMODE_UP;
+    timer->Init.Period = MOTOR_PWM_PERIOD;
+    timer->Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+    timer->Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
+    if (HAL_TIM_PWM_Init(timer) != HAL_OK) Error_Handler();
+    for (channel = TIM_CHANNEL_1; channel <= TIM_CHANNEL_4; channel += 4U) {
+      if (HAL_TIM_PWM_ConfigChannel(timer, &oc, channel) != HAL_OK ||
+          HAL_TIM_PWM_Start(timer, channel) != HAL_OK) Error_Handler();
+    }
+    last_sign[side] = 0;
+    coasting[side] = 1U;
+    coast_at[side] = HAL_GetTick() - MOTOR_REVERSE_COAST_MS;
+    applied[side] = 0;
+  }
+  pwm_motor_stop();
 }
