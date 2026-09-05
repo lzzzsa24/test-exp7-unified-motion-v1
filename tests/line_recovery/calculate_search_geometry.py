@@ -98,36 +98,23 @@ def main():
         "candidate_left_search_cps_M1_M2_M3_M4": [-q, -q, q, q],
         "candidate_right_search_cps_M1_M2_M3_M4": [q, q, -q, -q],
         "candidate_wheel_circumferential_mm_s": q * math.pi * d / n,
-        "episode_watchdog_ms": 8000,
+        "episode_watchdog_ms": None,
         "centre_pivot_wheel_path_radius_mm": math.hypot(length / 2, b / 2),
         "rear_pivot_front_path_radius_mm": math.hypot(length, b / 2),
         "rear_pivot_rear_path_radius_mm": b / 2,
         "rear_pivot_body_lateral_mm_s_at_nominal_yaw": math.radians(yaw / 1000) * length / 2,
         "physical_pivot_verified": False,
     }
-    recovery_text = (ROOT / "Core/Src/line_recovery.c").read_text(encoding="utf-8-sig")
-    report["local_recovery_wheel_travel_limits_not_chassis_distance"] = {}
-    for name in ("BACKTRACK_COUNTS", "PROBE_COUNTS", "EDGE_COUNTS", "ROLLBACK_LIMIT", "COARSE_MARGIN", "MOTION_MINIMUM"):
-        match = re.search(r"^#define\s+" + name + r"\s+MM_COUNTS\((\d+)\)",
-                          recovery_text, re.MULTILINE)
-        if not match:
-            raise ValueError(f"Missing recovery distance constant: {name}")
-        mm = int(match.group(1))
-        count = mm * 1000000 * n // (3141593 * d)
-        report["local_recovery_wheel_travel_limits_not_chassis_distance"][name] = {
-            "nominal_wheel_mm": mm, "counts": count,
-        }
-    report["local_recovery_timeouts_ms"] = {
+    # Policy metadata; behavioural regression in run.cmd checks persistence.
+    report["search_has_timeout"] = False
+    report["search_has_distance_limit"] = False
+    report["search_same_direction_until_capture"] = True
+    report["capture_confirmation_ms"] = {
         name: literal("Core/Src/line_recovery.c", name)
-        for name in ("EPISODE_TIMEOUT_MS", "MOVE_TIMEOUT_MS", "PROBE_TIMEOUT_MS", "EDGE_TIMEOUT_MS")
+        for name in ("SENSOR_CONFIRM_MS", "CAPTURE_STATIONARY_MS")
     }
-    limits = report["local_recovery_wheel_travel_limits_not_chassis_distance"]
-    report["blind_scan_stages"] = [
-        {"stage": stage,
-         "wheel_counts": stage * limits["PROBE_COUNTS"]["counts"],
-         "timeout_ms": stage * report["local_recovery_timeouts_ms"]["PROBE_TIMEOUT_MS"]}
-        for stage in range(1, literal("Core/Src/line_recovery.c", "MAX_PROBES") + 1)
-    ]
+    report["capture_minimum_settle_ms"] = literal("Core/Src/line_tracking.c", "TRACKING_REACQUIRE_SETTLE_MS")
+    report["preset_audio_repeat_until_confirmed_line_or_stop"] = True
     report["recovery_uses_exact_position_moves"] = False
     pose = (args.dx_mm, args.dy_mm, args.angle_deg)
     if any(v is not None for v in pose):

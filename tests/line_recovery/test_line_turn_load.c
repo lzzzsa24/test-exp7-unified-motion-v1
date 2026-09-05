@@ -10,14 +10,18 @@
 #include "motorPWM.h"
 #include "main.h"
 #include "line_tracking.h"
+#include "buzzer_phrase_40077493715.h"
 
 static uint32_t tick;
 static int32_t counts[4];
 static int16_t pins[4];
+static GPIO_PinState buzzer;
 static WheelEncoderDiagnostics diagnostics;
 uint32_t HAL_GetTick(void) { return tick; }
 int HAL_GPIO_ReadPin(GPIO_TypeDef *p,uint16_t n) { (void)p; (void)n; return 1; }
 void HAL_GPIO_Init(GPIO_TypeDef *p,GPIO_InitTypeDef *g) { (void)p; (void)g; }
+void HAL_GPIO_WritePin(GPIO_TypeDef *p,uint16_t n,GPIO_PinState s)
+{ assert(p==Buzzer_GPIO_Port && n==Buzzer_Pin); buzzer=s; }
 void WheelEncoder_Start(void) {}
 void WheelEncoder_GetCounts(WheelEncoderCounts *c)
 { c->motor1=counts[0]; c->motor2=counts[1]; c->motor3=counts[2]; c->motor4=counts[3]; }
@@ -37,6 +41,7 @@ static void reset(void)
   memset(counts,0,sizeof counts);
   memset(&diagnostics,0,sizeof diagnostics);
   DriveBase_Init();
+  BuzzerPhrase400_Init();
 }
 static void command(int32_t left,int32_t right,uint8_t assist)
 {
@@ -140,7 +145,7 @@ static void test_position_coast_handoff(int32_t direction)
   DriveBase_Stop(DRIVE_STOP_COAST);
 }
 
-static void test_real_retrace_capture(void)
+static void test_real_search_capture(void)
 {
   DriveBaseTelemetry t;
   LineTrackingCommand output={0};
@@ -163,7 +168,7 @@ static void test_real_retrace_capture(void)
     if(ms>=300 && !found)
     {
       reading.x1_black=reading.x3_black=0;
-      if(t.mode==DRIVE_BASE_SPEED && t.requested_cps[0]<0 && t.requested_cps[2]<0)
+      if(t.mode==DRIVE_BASE_SPEED && t.requested_cps[0]<0 && t.requested_cps[2]>0)
       {
         if(!saw_reverse) reverse_origin=counts[0];
         saw_reverse=1;
@@ -184,50 +189,47 @@ static void test_real_retrace_capture(void)
   assert(output.valid && output.left_cps==5273 && output.right_cps==5273);
   assert(!DriveBase_GetFaultMask());
   line_tracking_reset(); DriveBase_Stop(DRIVE_STOP_COAST);
-  puts("PASS: real line loss -> continuous retreat -> middle hit -> brake -> slow capture -> normal (no position mode)");
+  assert(!BuzzerPhrase400_IsPlaying() && !buzzer);
+  puts("PASS: real line loss -> persistent search -> middle hit -> brake -> silent capture -> normal");
 }
 static void test_real_white_search(void)
 {
-  LineTrackingReading white={0};
+  LineTrackingReading reading={0};
   LineTrackingCommand output={0};
   DriveBaseTelemetry t;
   unsigned ms,i;
-  uint8_t spun=0;
   line_tracking_reset(); reset(); line_tracking_set_no_line_forward(0);
-  for(ms=0;ms<8500;++ms)
+  line_tracking_set_smooth_mode(0);
+  for(ms=0;ms<90000;++ms)
   {
     for(i=0;i<4;++i) counts[i]+=pins[i]>0?3:(pins[i]<0?-3:0);
-    ++tick; DriveBase_Task(tick); DriveBase_GetTelemetry(&t);
+    ++tick; BuzzerPhrase400_Task(tick); DriveBase_Task(tick); DriveBase_GetTelemetry(&t);
     assert(!t.fault_mask && t.mode!=DRIVE_BASE_POSITION);
-    if(t.mode==DRIVE_BASE_SPEED && t.requested_cps[0]==-t.requested_cps[2] && t.requested_cps[0]) spun=1;
-    line_tracking_compute(&white,3000,&output);
+    line_tracking_compute(&reading,3000,&output);
     if(output.valid)
     {
       if(!output.left_cps && !output.right_cps) DriveBase_Stop(DRIVE_STOP_COAST);
       else DriveBase_SetSideCps(output.left_cps,output.right_cps);
     }
-    if(spun && output.valid && !output.left_cps && !output.right_cps) break;
+    if(ms>100) assert(!output.valid && t.requested_cps[0]<0 && t.requested_cps[2]>0);
   }
-  assert(spun && ms>1000 && ms<8100 && !DriveBase_GetFaultMask());
-  for(i=0;i<4;++i) assert(pins[i]==0);
-  /* The stopped car must still sample a returned middle line, debounce it,
-     and hand real motor ownership back through slow capture to normal drive. */
-  white.x1_black=white.x3_black=1;
+  assert(BuzzerPhrase400_IsPlaying());
+  reading.x1_black=reading.x3_black=1;
   for(ms=0;ms<700;++ms)
   {
     for(i=0;i<4;++i) counts[i]+=pins[i]>0?3:(pins[i]<0?-3:0);
-    ++tick; DriveBase_Task(tick);
-    line_tracking_compute(&white,3000,&output);
+    ++tick; BuzzerPhrase400_Task(tick); DriveBase_Task(tick);
+    line_tracking_compute(&reading,3000,&output);
     if(output.valid)
     {
       if(!output.left_cps && !output.right_cps) DriveBase_Stop(DRIVE_STOP_COAST);
       else DriveBase_SetSideCps(output.left_cps,output.right_cps);
     }
     assert(!DriveBase_GetFaultMask());
-    if(ms<80) for(i=0;i<4;++i) assert(pins[i]==0);
   }
-  assert(output.left_cps==5273 && output.right_cps==5273);
-  puts("PASS: real all-white stop -> stationary line debounce -> slow capture -> normal, no position/fault bypass");
+  assert(output.left_cps==5273 && output.right_cps==5273 && !BuzzerPhrase400_IsPlaying() && !buzzer);
+  DriveBase_Stop(DRIVE_STOP_COAST); line_tracking_reset();
+  puts("PASS: real 90-second rotation/audio -> confirmed line -> silent normal driving");
 }
 int main(void)
 {
@@ -324,7 +326,7 @@ int main(void)
   tick=UINT32_MAX-200;
   test_position_coast_handoff(1);
   test_position_coast_handoff(-1);
-  test_real_retrace_capture();
+  test_real_search_capture();
   test_real_white_search();
   (void)trace(2500,-2500,0,1);
   for(i=0;i<4;++i) sample(creep);
