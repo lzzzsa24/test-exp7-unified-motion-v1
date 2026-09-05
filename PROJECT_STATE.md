@@ -1,5 +1,14 @@
 # Shared project state
 
+> Isolated historical test worktree: `test/sep3-predicted-spin`.
+> Integration deployment below remains a reference snapshot, not this test's
+> deployment claim. Candidate `3733303` restores the September 3 14:09 timed
+> single-direction line decisions through the current DriveBase. See
+> `SEP3_LINE_TEST.md` for provenance, limitations and test instructions.
+> Newest user observation: current four-sensor tracking is worse than the early
+> September 3 version; the remembered version did not reverse after losing line.
+> This candidate is built and host-tested only; no flashing or physical test.
+
 This is the handoff record for humans, Codex tasks, and delegated models. It is
 not a substitute for Git: the checker resolves the live branch and HEAD every
 time. Only the integration coordinator updates this file after a merge, flash,
@@ -23,11 +32,11 @@ flashed_bin_sha256: 15BE841FDB40707F93DED4C3058B02057C9460C6ACA018B733FDFCAB8F4A
 flashed_hex_sha256: A9B1C95DBC80FDA656BFE14346EFD09A85BDF7983971D72402C170D52A290E3B
 ground_test_status: geometry_line_search_flashed_ground_test_pending_buzzer_passed
 k210_status: removed
-candidate_source_commit: dec0a27
-candidate_bin_size_bytes: 63796
-candidate_bin_sha256: 15BE841FDB40707F93DED4C3058B02057C9460C6ACA018B733FDFCAB8F4AEA89
-candidate_hex_sha256: A9B1C95DBC80FDA656BFE14346EFD09A85BDF7983971D72402C170D52A290E3B
-user_reported_flash: tool_verified_current_candidate
+candidate_source_commit: 3733303
+candidate_bin_size_bytes: 61376
+candidate_bin_sha256: F7E8173E5416C9234D887029BA2BDB1D15B166DC4DBE2D25642B83FE74837F88
+candidate_hex_sha256: 85D8B425892776AED7CBF7F4F01D0DD80F3BDA7FE944D98A85C61346C29AE1CA
+user_reported_flash: historical_test_candidate_not_flashed
 ```
 
 `repository_head_at_update` is the source/history anchor present when this
