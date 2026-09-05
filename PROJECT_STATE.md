@@ -1,9 +1,9 @@
 # Shared project state
 
-This checkout now contains the independent simple four-sensor candidate.
-Source state is live Git. Deployment facts below are explicitly separate from
-this unflashed candidate; they were refreshed from the other integration
-worktree's committed record during this task.
+This checkout contains the continuous four-sensor line follower, SL2.
+Live Git identifies source. The new candidate has not been flashed by this
+task. The user's latest driving observation is recorded separately from the
+older programmer-verified deployment record.
 
 ## Machine-readable snapshot
 
@@ -11,8 +11,8 @@ worktree's committed record during this task.
 state_schema_version: 1
 state_updated_at: 2026-09-05
 integration_branch: feature/simple-four-line
-repository_head_at_update: 6f6f014
-latest_code_commit: 6f6f014
+repository_head_at_update: 1476354
+latest_code_commit: 1476354
 flashed_source_commit: 8c4af2b
 flash_record_commit: 6c528d8
 deployed_tag: deployed/2026-09-05-confirmed-line-resume
@@ -21,131 +21,146 @@ formal_hex_path: manual-build-simple-line/simple_four_line.hex
 formal_bin_size_bytes: 68172
 flashed_bin_sha256: BE3C5461CAB290E6DD65EF1A5D50F839289DB592880F200034CB1CDFCD654F0D
 flashed_hex_sha256: 4E6D00F7A8CD3A9A11F13B88259E9C0C87A6033A8330E26AB3EE9E8C711BB27D
-ground_test_status: simple_four_line_unflashed_and_untested
+ground_test_status: earlier_image_user_reports_repeated_stops_SL2_unflashed
 k210_status: removed
-candidate_source_commit: 6f6f014
-candidate_bin_size_bytes: 10048
-candidate_bin_sha256: 8720FB0CE906FC4AF3BC7B97E05F64712DE9368495DC7A7DA99F2B498F0177BF
-candidate_hex_sha256: EDD564E8033E133787AD543869097DC438A6D15E2C4D698E063F1186678B52F9
-user_reported_flash: no_new_simple_line_flash
+candidate_source_commit: 1476354
+candidate_bin_size_bytes: 9616
+candidate_bin_sha256: 33B3EA47F0B03B1E415B91D5C58B089CA22CEEB539895953C9B6E1E782BBC781
+candidate_hex_sha256: 3C742B22ABB4A7CD4E6B00026B422C2763C2929A8DB852A4AA32E353116840FC
+user_reported_flash: current_driving_image_hash_unverified
 ```
 
-The schema-1 checker uses `formal_bin_size_bytes` as the last flashed
-snapshot size, despite the field's legacy name. The active build paths now
-point to the new candidate, whose size is `candidate_bin_size_bytes`.
-Do not infer deployment from a matching candidate file. The repository anchor
-and candidate identify source commit `6f6f014`; state-only commits may follow.
+Schema 1 uses `formal_bin_size_bytes` as the last programmer-verified
+snapshot size. The active paths point to the new candidate, whose size is
+`candidate_bin_size_bytes`. The flashed fields and deployed tag are an
+older verified record; they are not proof of which image the user just drove.
+The anchor is source commit `1476354`; documentation-only commits may follow.
 
-## Active candidate
+## Latest user observation and requested change
 
-- Checkout: `F:myprojectjidianproject	est-exp7-unified-motion-v1`.
-- Branch: `feature/simple-four-line`, created from `d2efe0e` at the user's request.
-- Immutable starting-point tag: `rollback/2026-09-05-before-simple-four-line` -> `d2efe0e`.
-- Source: `6f6f014` (`Implement standalone four-sensor line follower`).
-- The application was written afresh in `SimpleLine`. Historical projects
-  supplied hardware facts, interface mappings and measured motor calibration
-  points, not the old driving/recovery state machines.
-- The rewritten `Core/Src/motorPWM.c` retains the exact wheel order,
-  forward/reverse polarity, TIM mapping and measured calibration points.
-  It adds a 10 ms zero-output interval before reversing an energized side.
-- The build explicitly selects the new application plus MCU/HAL/runtime
-  support. No old DriveBase, recovery, encoder, obstacle or vision controller
-  appears in the ELF. CubeIDE Debug/Release selections are synchronized.
-- `build_unified_motion.ps1` is the standard entrypoint and delegates to
-  `build_simple_line.ps1`. The linker reserves 0x0807F800..0x0807FFFF.
-- Build products remain ignored by Git. Rebuild the named source commit on
-  another machine. No remote push, serial-port access or flash was performed
-  by this task.
+On 2026-09-05 the user reported that the car stops immediately on line loss,
+also moves briefly then stops while still on the line, and requires repeated
+button presses to make slow forward progress. The user explicitly requested
+removing timeout stops and searching continuously after loss until a remote
+stop command.
 
-## Candidate behavior and controls
+The previous simple source had several possible automatic-stop triggers:
+900 ms turn/search, 300 ms wide line, 60 ms all-white gap with no recent
+direction, 50 ms unstable samples, 50 ms control-loop delay and a watchdog
+reset path. UART errors also generated STOP. No contemporaneous serial reason
+or current Flash hash was supplied, so the exact trigger is not diagnosed.
 
-All definitions in this section apply after the simple candidate is flashed,
-not to the currently recorded integrated firmware.
+The revision removes these automatic-stop paths together. The reported
+behavior belongs to the earlier image the user drove; SL2 has no new physical
+result yet.
+
+## Active candidate and rollback
+
+- Checkout: `F:/myproject/jidian/project/test-exp7-unified-motion-v1`.
+- Branch: `feature/simple-four-line`, originally created from `d2efe0e`.
+- Source: `1476354` (`Keep simple line tracking active until an operator stop`).
+- Current revision identifier in UART status: `SL2`.
+- Immediate rollback tag:
+  `rollback/2026-09-05-before-continuous-simple-line` -> `1747620`.
+- Previous BIN/HEX/ELF/MAP and source manifest were copied to
+  `manual-build-simple-line-before-continuous-search`. The saved BIN is
+  10048 bytes with SHA-256
+  `8720FB0CE906FC4AF3BC7B97E05F64712DE9368495DC7A7DA99F2B498F0177BF`.
+- Original project rollback:
+  `rollback/2026-09-05-before-simple-four-line` -> `d2efe0e`.
+- Build entrypoint remains `build_unified_motion.ps1`, delegating to
+  `build_simple_line.ps1`. Build artifacts are ignored by Git.
+- Motor PWM, polarity, per-wheel calibration and the 10 ms reversal-coast
+  interval are unchanged. This revision does not retune driving speeds.
+- Only this checkout was modified. No serial access, flash or remote push
+  was performed.
+
+## SL2 behavior and controls
 
 | Input | Action |
 |---|---|
-| power-on / reset | STOP; start keys held at boot require release |
-| physical KEY1 or KEY2; remote/serial 1 or 2 | start the single line-following mode |
-| physical KEY3; remote/serial 0 or 3 | STOP; physical KEY3 wins while held |
+| power-on / reset | STOP; held start keys must be released |
+| physical KEY1 / KEY2; remote or serial 1 / 2 | start continuous tracking/search |
+| physical KEY3; remote or serial 0 / 3 | STOP; held KEY3 wins over START |
 | serial s / S / space | STOP |
-| serial ? | request current raw/filtered sensors and applied logical PWM |
+| serial ? | report raw/filtered sensors and applied logical PWM |
 
-- Sensor order left-to-right is X2/PF14, X1/PF13, X3/PF15, X4/PG0.
-  Black is electrically low and displayed as 1.
-- Every 5 ms, two identical samples accept a new mask. Centre readings drive
-  straight or apply a two-level differential correction. Outer-only or the
-  two same-side readings counter-rotate the sides.
-- White after a recent turn continues that direction. Without a recent
-  direction, moving over a short gap is limited to 60 ms. Starting on all
-  white leaves the motors stopped.
-- Sharp turns and searches share a 900 ms deadline. Only 30 ms of centre
-  evidence clears it; transient centre hits and repeated START cannot renew it.
-- Wide/junction/disjoint masks travel straight slowly for at most 300 ms.
-  Continuous unstable input for 50 ms, a control-loop gap above 50 ms,
-  or exhausted recovery causes a latched STOP requiring explicit restart.
-- An independent watchdog is fed only after each completed control cycle.
-  Its nominal interval is 200 ms at 40 kHz LSI; physical timing is unmeasured.
-- USART1 RX/TX use interrupts; busy telemetry is dropped. Raw sensors also
-  drive four RGB components. LED1 indicates running; LED2 indicates automatic
-  fault stop. Status changes chirp the active buzzer briefly.
-- This application does not sample encoders, battery, obstacles or K210, and
-  does not refresh OLED. PWM zero is coasting rather than mechanical braking.
-  It supplies no wheel-stall or low-battery protection.
+- Each 5 ms control pass uses physical order X2/PF14, X1/PF13, X3/PF15, X4/PG0.
+  Black is electrically low and represented by 1.
+- The first sample after explicit START decides immediately; subsequent
+  changes require two identical samples. Persistent noise keeps the last
+  accepted action rather than stopping.
+- Centre 0110 drives both sides at 2400. Single inner readings apply
+  2200/2600 differential correction. Outer-only or same-side pairs
+  counter-rotate at 2700, without a time limit.
+- All-white starts or continues an uninterrupted spin toward the last
+  observed left/right direction. With no direction in the current run,
+  default is left (-1), configurable in `line_config.h`.
+- Direction history never expires with elapsed time. Search does not alternate
+  just because time passes. A confirmed middle reading restores tracking
+  immediately, with no need to reselect a mode.
+- Wide/junction/disjoint masks continue slowly at 2200/2200 without a deadline.
+  There are no gap, turn, search, wide, noisy-input or loop-delay stop timers.
+  No independent watchdog is started by this firmware.
+- During ordinary operation, STOP is issued only by operator input. Initial
+  boot/reset remains stopped, and CPU/clock faults still disable PWM in the
+  fault handler. The 10 ms zero-output reversal interval is not a latched stop.
+- UART RX/TX remain interrupt-driven. Damaged input bytes are discarded and
+  error flags cleared; a UART error does not invent a STOP event. Valid remote,
+  key and serial STOP events retain priority.
+- LED1 indicates running; LED2 now indicates SEARCH. Raw sensors still drive
+  four RGB components. Status reasons are USER/OK, with prefix SL2.
+- Encoders, battery, obstacle sensing, K210 and OLED remain unused by this
+  application. PWM zero means coasting, not active mechanical braking.
 
-## Latest recorded deployment, from the other task
+## Older programmer-verified deployment record
 
-During this task, `feature/line-reacquire-lock` independently advanced in
-`F:myprojectjidianworktreesline-reacquire-integration`. Its state at
-`7a79682` records source `8c4af2b` as flashed, with record `6c528d8`
-and tag `deployed/2026-09-05-confirmed-line-resume`.
-That record says COM11, 57600 baud, 34 selectively erased firmware pages,
-calibration page retained, 68172-byte write/readback, VERIFY OK and GO OK.
+The other worktree is
+`F:/myproject/jidian/worktrees/line-reacquire-integration`.
+Its branch `feature/line-reacquire-lock` remained at `7a79682` when
+checked this turn. That committed record identifies `8c4af2b` as flashed
+with record `6c528d8` and tag
+`deployed/2026-09-05-confirmed-line-resume`.
 
-These are imported committed deployment facts, not a flash performed or a
-physical test witnessed by this simple-line task. The source changes from
-that other branch were not merged here. If that branch advances again,
-refresh its deployment record before the next hardware operation.
+The older record says COM11 at 57600 baud, 34 selectively erased pages,
+calibration page preserved, 68172-byte write/readback, VERIFY OK and GO OK.
+This task did not perform or revalidate that flash. The user's newer driving
+report takes precedence for observed behavior, but does not establish the
+current image's exact commit/hash. Refresh deployment state before the next
+hardware operation. The older integrated image uses KEY3/3 for figure eight;
+SL2 uses it for STOP.
 
-Its integrated KEY3/3 still selects the encoder figure eight. Do not apply the
-candidate's new KEY3 STOP meaning until the candidate is actually deployed.
+## Stable hardware facts
 
-## Hardware facts
+- YB-DSF01-V1.1 / STM32F103ZETx; HSE 8 MHz and system clock 72 MHz.
+- M1 left-front/M2 left-rear: TIM8 PC6/7/8/9.
+  M3 right-front/M4 right-rear: fully remapped TIM1 PE9/11/13/14.
+  PWM is 20 kHz, ARR 3599; polarity remains centralized in motorPWM.c.
+- Four repaired AB encoders, M2 on PA15/PB3; no obsolete fallback restored.
+- K210 is recorded removed. OLED is the separate J12 display.
+- Last 2 KiB Flash page, 0x0807F800..0x0807FFFF, remains reserved and unwritten.
+- Complete mapping and historical hardware evidence: `SimpleLine/HARDWARE.md`.
 
-- Board: YB-DSF01-V1.1 / STM32F103ZETx, 8 MHz HSE / 72 MHz system clock.
-- M1 left-front and M2 left-rear use TIM8 PC6/7/8/9; M3 right-front and M4
-  right-rear use fully remapped TIM1 PE9/11/13/14. PWM is 20 kHz, ARR 3599.
-- The four AB encoders are recorded repaired. M2 is PA15/PB3; the old single-edge
-  fallback is obsolete. They are not used by this candidate.
-- K210 is recorded physically removed. The OLED is the separate J12 device.
-- Historical PWM calibration was wheels-off-ground evidence, not loaded
-  vehicle speed or yaw evidence. No new physical observations were supplied.
-- Full mapping and evidence sources: `SimpleLine/HARDWARE.md`.
-
-## Evidence ledger for the simple candidate
+## Evidence for source 1476354 / SL2
 
 | Evidence | Result | Scope |
 |---|---|---|
-| computer compile/link | passed | GNU Arm GCC, application -Wall -Wextra -Werror; BIN 10048 bytes |
-| controller/operator host tests | passed | 237 assertions; all 16 masks, filtering, timeout bounds, repeat/held keys, NEC and tick wrap |
-| board/motor host tests | passed | 18079 assertions including full PWM sweep, GPIO order, direction mapping, reversal interval, UART; HAL/register stubs |
-| artifact / IDE static checks | passed | 22 compiled C source hashes match manifest; old control symbols absent; Debug/Release source exclusions checked |
-| flash/readback/GO | not performed | this simple candidate has never been deployed by this task |
-| wheels off ground | not performed | host register tests do not prove motor motion |
-| ground driving | not performed | PWM and timeout values remain initial settings for actual testing |
+| computer compile/link | passed | GNU Arm GCC; application -Wall -Wextra -Werror; BIN 9616 bytes |
+| controller/operator host tests | passed | 169790 assertions; all 16 masks stay active for 10 simulated seconds each, left/right search for 5 simulated minutes each, noise, reacquisition, delayed steps, wraparound and manual STOP |
+| board/motor host tests | passed | 18105 assertions; hardware mappings and PWM sweep, reversal timing, busy UART, corrupt bytes ignored, remote 0 decoded by real IRQ code then controller/PWM stop |
+| artifact/static checks | passed | all 22 C source hashes match manifest; old controller/watchdog symbols absent; active Line_Stop callers are initialization and operator events |
+| flash/readback/GO | not performed this turn | no SL2 deployment proof |
+| wheels off ground | not performed this turn | HAL/register stubs do not prove physical motion |
+| ground driving | SL2 untested | user's repeated-stop report concerns the earlier running image |
 
-The old firmware's buzzer pass or flash record does not validate the new
-candidate's motor or sensor behavior. Details and use instructions are in
-`SimpleLine/README.md`.
+Simulated minutes are host test inputs, not wall-clock vehicle driving.
+The previous source's physical failure report does not prove that the new
+revision has fixed the real car. No current firmware hash was read back.
 
-## Next step and update protocol
+## Handoff
 
-The requested branch implementation, local source commit, build and host
-verification are complete. No hardware operation is currently authorized.
-A later explicit flash request should first enumerate ports and refresh the
-other branch's deployment state, retain the calibration page, then verify the
-exact candidate. Afterwards separately check sensor order, lifted-wheel
-directions/STOP, and ground straight/left/right/loss/wide-line behavior.
-
-Only record physical conclusions actually observed. Keep source, candidate
-artifacts and last flashed facts separate; never call host tests or byte
-readback a successful ground test.
+Implementation, local source commit, build and relevant host checks are done.
+A later explicit flash request must enumerate the current serial port and
+preserve the calibration page. After deployment, check the SL2 prefix, an
+all-white start and continuous search, reacquisition, and remote 0/3 STOP.
+Record flash verification, lifted-wheel behavior and ground driving separately.
