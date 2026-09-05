@@ -44,6 +44,7 @@ static int32_t probe_origin[4];
 static int32_t move_origin[4], move_cps[4], move_limit[4];
 static uint32_t move_start, move_timeout;
 static RecoveryPhase phase, capture_from;
+static LineRecoveryStopReason stop_reason;
 
 static int32_t absolute(int32_t v) { return v < 0 ? -v : v; }
 static void counts_now(int32_t values[4])
@@ -66,9 +67,11 @@ static uint8_t center_stable(uint8_t visible, uint32_t now)
   if (!center_candidate) { center_candidate = 1U; center_since = now; }
   return now - center_since >= SENSOR_CONFIRM_MS;
 }
-static void fail(void)
+LineRecoveryStopReason LineRecovery_GetStopReason(void) { return stop_reason; }
+void LineRecovery_Stop(LineRecoveryStopReason reason)
 {
   DriveBase_Stop(DRIVE_STOP_COAST);
+  stop_reason = reason;
   phase = REC_FAILED;
 }
 uint8_t LineRecovery_Expired(uint32_t now)
@@ -83,12 +86,14 @@ void LineRecovery_Reset(void)
   backtracks = probes = center_candidate = 0U;
   outer_candidate = side = 0;
   phase = REC_IDLE;
+  stop_reason = LINE_REC_STOP_NONE;
 }
 void LineRecovery_Commit(void)
 {
   /* Accept only after the caller's low-speed forward capture interval. */
   history_head = history_count = episode_active = 0U;
   phase = REC_IDLE;
+  stop_reason = LINE_REC_STOP_NONE;
 }
 void LineRecovery_Record(const LineTrackingReading *r, uint32_t now)
 {
@@ -219,7 +224,9 @@ LineRecoveryResult LineRecovery_Step(const LineTrackingReading *r,
   command->left_cps = command->right_cps = 0;
   command->action = side < 0 ? LINE_ACTION_SEARCH_LEFT : LINE_ACTION_SEARCH_RIGHT;
   DriveBase_Task(now);
-  if (LineRecovery_Expired(now)) fail();
+  if (DriveBase_GetFaultMask()) LineRecovery_Stop(LINE_REC_STOP_DRIVE_FAULT);
+  else if (phase != REC_FAILED && LineRecovery_Expired(now))
+    LineRecovery_Stop(LINE_REC_STOP_SEARCH_TIMEOUT);
   DriveBase_GetTelemetry(&telemetry);
   if (phase == REC_FAILED) return LINE_RECOVERY_FAILED;
   if (phase == REC_CAPTURED) return LINE_RECOVERY_CAPTURED;
@@ -240,7 +247,7 @@ LineRecoveryResult LineRecovery_Step(const LineTrackingReading *r,
     else if (finished == REC_BRAKE_ROLLBACK)
     {
       started = move_to(probe_origin, 0U, now);
-      if (!started) fail();
+      if (!started) LineRecovery_Stop(LINE_REC_STOP_RETURN_REJECTED);
       else if (started == 2U) { side = (int8_t)-side; wait_probe(now); }
       else phase = REC_ROLLBACK;
     }
@@ -261,7 +268,7 @@ LineRecoveryResult LineRecovery_Step(const LineTrackingReading *r,
     else
     {
       started = backtrack(now);
-      if (!started) fail();
+      if (!started) LineRecovery_Stop(LINE_REC_STOP_RETURN_REJECTED);
       else if (started == 2U) wait_probe(now);
       else { phase = REC_BACKTRACK; center_candidate = 0U; }
     }
@@ -280,8 +287,8 @@ LineRecoveryResult LineRecovery_Step(const LineTrackingReading *r,
     if (visible || outer) capture(phase, now);
     else if (completed || now - move_start >= move_timeout)
     {
-      if (minimum < MOTION_MINIMUM) fail();
-      else if (phase == REC_ROLLBACK && !completed) fail();
+      if (minimum < MOTION_MINIMUM) LineRecovery_Stop(LINE_REC_STOP_NO_MOTION);
+      else if (phase == REC_ROLLBACK && !completed) LineRecovery_Stop(LINE_REC_STOP_RETURN_TIMEOUT);
       else
       {
         RecoveryPhase finished = phase;
@@ -323,7 +330,7 @@ LineRecoveryResult LineRecovery_Step(const LineTrackingReading *r,
     if (outer && now - outer_since >= SENSOR_CONFIRM_MS) side = outer;
     if (now - phase_start >= DIRECTION_GUARD_MS && !visible)
     {
-      if (probes >= MAX_PROBES) fail();
+      if (probes >= MAX_PROBES) LineRecovery_Stop(LINE_REC_STOP_SCAN_LIMIT);
       else
       {
         /* Each wider probe starts after a coarse group return, not precise
@@ -344,7 +351,8 @@ LineRecoveryResult LineRecovery_Step(const LineTrackingReading *r,
     for (i = 0; i < 4U; ++i)
     {
       int32_t travel = (current[i] - probe_origin[i]) * (i < 2U ? side : -side);
-      if (absolute(current[i] - probe_origin[i]) > ROLLBACK_LIMIT) { fail(); break; }
+      if (absolute(current[i] - probe_origin[i]) > ROLLBACK_LIMIT)
+      { LineRecovery_Stop(LINE_REC_STOP_ENCODER_RANGE); break; }
       if (travel > maximum) maximum = travel;
       if (travel < minimum) minimum = travel;
     }
@@ -360,7 +368,7 @@ LineRecoveryResult LineRecovery_Step(const LineTrackingReading *r,
       else if (maximum >= (outer == side ? EDGE_COUNTS : PROBE_COUNTS * probes) ||
           now - phase_start >= (outer == side ? EDGE_TIMEOUT_MS : PROBE_TIMEOUT_MS * probes))
       {
-        if (minimum < MOTION_MINIMUM) fail();
+        if (minimum < MOTION_MINIMUM) LineRecovery_Stop(LINE_REC_STOP_NO_MOTION);
         else rollback_brake(now);
       }
     }
