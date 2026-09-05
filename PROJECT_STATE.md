@@ -11,22 +11,22 @@ or physical test.
 state_schema_version: 1
 state_updated_at: 2026-09-05
 integration_branch: feature/line-reacquire-lock
-repository_head_at_update: c018174
-latest_code_commit: 1bf6fe6
-flashed_source_commit: 1bf6fe6
-flash_record_commit: c018174
-deployed_tag: deployed/2026-09-05-continuous-recovery
+repository_head_at_update: 6c528d8
+latest_code_commit: 8c4af2b
+flashed_source_commit: 8c4af2b
+flash_record_commit: 6c528d8
+deployed_tag: deployed/2026-09-05-confirmed-line-resume
 formal_bin_path: manual-build-unified-motion/exp7_unified_motion.bin
 formal_hex_path: manual-build-unified-motion/exp7_unified_motion.hex
-formal_bin_size_bytes: 67800
-flashed_bin_sha256: 9A7D5A54585CD6093E65630BE5F5E835B53AEEDDAAF46E3CCCAB13C11E580789
-flashed_hex_sha256: BD157BEF956446E1633C6FE445CF5C5CB78982FA6017B6CA29AB3ADE89FCCC27
-ground_test_status: continuous_recovery_flashed_ground_test_pending_buzzer_passed
+formal_bin_size_bytes: 68172
+flashed_bin_sha256: BE3C5461CAB290E6DD65EF1A5D50F839289DB592880F200034CB1CDFCD654F0D
+flashed_hex_sha256: 4E6D00F7A8CD3A9A11F13B88259E9C0C87A6033A8330E26AB3EE9E8C711BB27D
+ground_test_status: confirmed_line_resume_flashed_ground_test_pending_buzzer_passed
 k210_status: removed
-candidate_source_commit: 1bf6fe6
-candidate_bin_size_bytes: 67800
-candidate_bin_sha256: 9A7D5A54585CD6093E65630BE5F5E835B53AEEDDAAF46E3CCCAB13C11E580789
-candidate_hex_sha256: BD157BEF956446E1633C6FE445CF5C5CB78982FA6017B6CA29AB3ADE89FCCC27
+candidate_source_commit: 8c4af2b
+candidate_bin_size_bytes: 68172
+candidate_bin_sha256: BE3C5461CAB290E6DD65EF1A5D50F839289DB592880F200034CB1CDFCD654F0D
+candidate_hex_sha256: 4E6D00F7A8CD3A9A11F13B88259E9C0C87A6033A8330E26AB3EE9E8C711BB27D
 user_reported_flash: tool_verified_current_candidate
 ```
 
@@ -38,22 +38,22 @@ checker requires the anchor to remain an ancestor and prints the live HEAD.
 
 - Repository: `F:\myproject\jidian\project\test-exp7-unified-motion-v1`
 - Integration branch: `feature/line-reacquire-lock`
-- Latest firmware source commit: `1bf6fe6` (`Recover lines with continuous group motion and coarse returns`), now flashed. It applies the requested `ad0a3ee` change on top of the current integration history, retaining per-wheel line-turn assistance, the position handoff fix, buzzer GPIO fix and IR centre-key audio.
-- Flash/readback record: `c018174` (`Record continuous grouped line recovery firmware flash`).
+- Latest firmware source commit: `8c4af2b` (`Resume confirmed lines after search exhaustion without clearing faults`), now flashed. It applies the requested `90381ee` change on top of the current integration history, retaining continuous grouped recovery, per-wheel line-turn assistance, the position handoff fix, buzzer GPIO fix and IR centre-key audio.
+- Flash/readback record: `6c528d8` (`Record confirmed-line resume firmware flash`).
 - The formal BIN above was rebuilt from the clean integration checkout, then
   written through the STM32 ROM bootloader on USB-SERIAL CH340K COM11 at
   57600 baud. Selective erase covered 34 firmware pages, preserved the final
-  calibration page, wrote and read back 67800 bytes with `VERIFY OK`, and
+  calibration page, wrote and read back 68172 bytes with `VERIFY OK`, and
   completed `GO OK: 0x08000000`.
 - Build products under `manual-build-*` are intentionally ignored by Git. A
   different computer must rebuild the named source commit rather than assume
   the artifact was transferred.
 - Current formal BIN/HEX were built in this integration checkout from
-  `1bf6fe6`. The preceding adaptive-search build remains under
+  `8c4af2b`. The preceding adaptive-search build remains under
   `manual-build-adaptive-line-search`.
   Previous isolated candidates remain under the validation directory.
-- Immediate rollback tag: `rollback/2026-09-05-before-continuous-recovery`
-  points to `307a2b7`. The buzzer GPIO fix and earlier adaptive-search rollback
+- Immediate rollback tag: `rollback/2026-09-05-before-confirmed-line-resume`
+  points to `d2efe0e`. The buzzer GPIO fix and earlier adaptive-search rollback
   points remain available.
 
 ## Current mode map
@@ -76,7 +76,7 @@ produce 1-, 5- or 8-beep drive alarms, and all-white recovery could alternate
 only very small opposite rotations. The new recovery avoids DriveBase position
 mode and its fine per-wheel completion during line reacquisition.
 
-The deployed `1bf6fe6` recovery changes KEY1/KEY2 as follows:
+The `1bf6fe6` continuous recovery retained in deployed `8c4af2b` changes KEY1/KEY2 as follows:
 
 - Normal tracking retains up to 16 middle-line encoder snapshots at 20 ms
   intervals. On loss it actively brakes; a line seen while stopping is
@@ -98,14 +98,24 @@ The deployed `1bf6fe6` recovery changes KEY1/KEY2 as follows:
   hit is stationary-confirmed before at least 500 ms of low-speed capture;
   stable outer evidence selects the next search direction but cannot directly
   restore normal-speed travel.
-- Any segment with a wheel moving less than 5 mm, a DriveBase fault, failed
-  return, three exhausted scans or the shared 8-second deadline stops recovery.
-  The recovery never clears a latched drive fault and does not call the
-  position-motion API. Wheel travel still cannot prove chassis displacement.
+- Any segment with a wheel moving less than 5 mm, an encoder-range anomaly or
+  a DriveBase fault remains a hard latched stop until mode reset. The recovery
+  never clears a latched drive fault and does not call the position-motion API.
+- Search timeout, scan exhaustion, rejected/expired return, capture timeout or
+  loss during a wait-originated rejoin now stops the wheels and waits for new
+  line evidence instead of permanently ignoring sensors. It does not restart
+  blind scanning or reset the spent search budget.
+- Only a middle sensor held continuously for 80 ms while stationary can leave
+  that wait state. Outer-only, wide-crossing and brief middle hits remain
+  stopped. A valid hit enters a fresh 500-800 ms low-speed rejoin window; a
+  failed wait-originated rejoin returns to stationary waiting.
+- Successful low-speed rejoin commits recovery and restores normal tracking.
+  User STOP and zero base-speed still cancel recovery. Wheel travel still
+  cannot prove chassis displacement.
 
 ## Current line-turn load assistance
 
-- Commit `63dbfe6`, retained in `1bf6fe6`, keeps the requested four-wheel CPS targets and adds a
+- Commit `63dbfe6`, retained in `8c4af2b`, keeps the requested four-wheel CPS targets and adds a
   bounded PWM supplement only to an accepted line-tracking differential or
   counter-rotation command. Straight travel, wide-line travel, stop, encoder
   position retrace/rollback and non-line modes do not receive this supplement.
@@ -122,7 +132,7 @@ The deployed `1bf6fe6` recovery changes KEY1/KEY2 as follows:
 
 ## Current position-control handoff
 
-- Commit `b424189`, retained in `1bf6fe6`, fixes the shared DriveBase transition from continuous
+- Commit `b424189`, retained in `8c4af2b`, fixes the shared DriveBase transition from continuous
   position-control PWM to the short-pulse region used near a target.
 - When an individual wheel enters that low-speed region, its previous
   continuous PWM is first set to zero and a fresh stop-settle window is
@@ -156,7 +166,7 @@ The deployed `1bf6fe6` recovery changes KEY1/KEY2 as follows:
 - The serial `b` command remains an equivalent one-shot diagnostic entry.
 - After flashing `0d31f10`, the user short-pressed the intended sound button
   and explicitly confirmed audible output (`响了`). The same fix remains in
-  deployed `1bf6fe6`.
+  deployed `8c4af2b`.
 
 ## Confirmed hardware facts
 
@@ -173,23 +183,24 @@ The deployed `1bf6fe6` recovery changes KEY1/KEY2 as follows:
 
 | Evidence level | Current result | Scope |
 |---|---|---|
-| computer build/link | passed | integrated formal `1bf6fe6`; BIN is 67800 bytes; buzzer fix retained |
-| host regression | passed | 2493/1870-CPS recovery profiles pass continuous retreat, widening scans, coarse returns, capture, faults and watchdog; real DriveBase integration remains in speed mode without position timeout/sync faults; load-assist and position-handoff regressions also pass; MSVC /W4 /WX |
-| flash/readback/GO | passed | COM11 at 57600 baud; 34-page selective erase; calibration page preserved; 67800-byte write and readback; `VERIFY OK`; `GO OK` |
+| computer build/link | passed | integrated formal `8c4af2b`; BIN is 68172 bytes; buzzer fix retained |
+| host regression | passed | both continuous-recovery profiles pass; real DriveBase tests pass all-white stop, stationary middle-line debounce, bounded low-speed rejoin and normal resume without position/fault bypass; hard faults remain latched; load-assist and position-handoff regressions also pass; MSVC /W4 /WX |
+| flash/readback/GO | passed | COM11 at 57600 baud; 34-page selective erase; calibration page preserved; 68172-byte write and readback; `VERIFY OK`; `GO OK` |
 | physical buzzer | passed | user explicitly confirmed `响了` after the PG12 initialization fix; fix retained in current firmware |
 | wheels off ground | not performed this turn | diagnostic image compilation is not a lifted-wheel test |
-| ground driving | current continuous-recovery firmware untested | grouped retreat/search/return, capture, drift and any fault alarm require same-surface observation |
+| ground driving | current confirmed-line-resume firmware untested | stationary reacquisition, low-speed rejoin, grouped recovery, drift and any fault alarm require same-surface observation |
 
 ## Open issue and next safe step
 
-The requested continuous grouped recovery integration, formal build, all host
+The requested confirmed-line resume integration, formal build, all host
 regressions, flash, readback verification and GO are complete. Physical buzzer
 output was confirmed on an earlier firmware and its source fix is retained.
-Ground-test loss after straight travel and after left/right curves. Observe
-whether it now makes meaningful grouped motion instead of alternating tiny
-pulses, whether failed scans return approximately, and whether capture holds.
-If it stops with warning beeps, record the group count or serial fault mask.
-Use the immediate rollback point if it performs worse.
+Ground-test a case where search ends silently, then move the middle sensors
+steadily over the line without reselecting the mode. Confirm that the car waits
+while all-white, resumes only after stable middle-line evidence, and holds the
+line during low-speed rejoin. If it stops with warning beeps, record the group
+count or serial fault mask. Use the immediate rollback point if it performs
+worse.
 
 ## Update protocol
 
