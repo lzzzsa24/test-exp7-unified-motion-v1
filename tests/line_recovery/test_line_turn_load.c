@@ -237,6 +237,36 @@ static void test_real_white_search(void)
   DriveBase_Stop(DRIVE_STOP_COAST); line_tracking_reset();
   puts("PASS: real 90-second rotation/audio -> confirmed line -> silent normal driving");
 }
+static void test_no_motion_keeps_turn_effort(void)
+{
+  unsigned wheel, step;
+  int direction;
+  for(direction=-1;direction<=1;direction+=2) for(wheel=0;wheel<4;++wheel)
+  {
+    int32_t left=2500*direction, right=-left;
+    int32_t delta[4]={left/50,left/50,right/50,right/50};
+    int16_t before=0;
+    LineFaultRecord record={0};
+    reset(); DriveBase_SetLineFaultObservation(1,0,1); delta[wheel]=0;
+    for(step=0;step<150;++step)
+    {
+      command(left,right,1); sample(delta);
+      if(step==74) before=pins[wheel]; /* Before the 1600-ms observation. */
+    }
+    printf("no-motion wheel %u direction %d: before=%d after=%d\n",wheel+1,direction,before,pins[wheel]);
+    fflush(stdout);
+    assert(absolute(pins[wheel])>=absolute(before));
+    assert(!DriveBase_GetFaultMask() && !DriveBase_GetLineDegradedMask());
+    assert(LineFaultLog_Get(0,&record) && record.stall_mask==(1U<<wheel));
+    assert(!record.direction_mask && !record.signal_mask);
+    /* When traction returns, feedback reduces effort; no permanent boost. */
+    delta[wheel]=(wheel<2?left:right)/50;
+    for(step=0;step<30;++step) { command(left,right,1); sample(delta); }
+    assert(absolute(pins[wheel])<absolute(before));
+    DriveBase_Stop(DRIVE_STOP_COAST); DriveBase_SetLineFaultObservation(0,0,0);
+    assert(!pins[0] && !pins[1] && !pins[2] && !pins[3] && LineFaultLog_Count());
+  }
+}
 static void test_observe_faults(void)
 {
   unsigned kind, i;
@@ -258,14 +288,16 @@ static void test_observe_faults(void)
       assert(!DriveBase_GetFaultMask() && pins[0]>0 && pins[2]<0);
     }
     DriveBase_GetTelemetry(&t);
-    assert(t.mode==DRIVE_BASE_SPEED && DriveBase_GetLineDegradedMask()==1);
+    assert(t.mode==DRIVE_BASE_SPEED && DriveBase_GetLineDegradedMask()==(kind==0?0:1));
     assert(LineFaultLog_Count()==1 && LineFaultLog_Get(0,&r));
     assert(r.stall_mask==(kind==0?1:0) && r.direction_mask==(kind==1?1:0));
     assert(r.signal_mask==(kind==2?1:0) && r.battery_mv==7800 && r.occurrences>1);
     assert(r.requested[0]==2500 && r.delta[0]==delta[0] && r.sensor_mask==5);
-    assert(r.recovery_state==1 && r.degraded_mask==1);
-    /* Bad feedback does not repeatedly add PI/startup/load effort. */
-    assert(t.output_pwm[0]<3000 && t.output_pwm[0]>0);
+    assert(r.recovery_state==1 && r.degraded_mask==(kind==0?0:1));
+    /* No motion retains effort; contradictory/noisy feedback falls back. */
+    assert(t.output_pwm[0]>0);
+    if(kind==0) assert(t.output_pwm[0]>3400);
+    else assert(t.output_pwm[0]<3000);
     DriveBase_Stop(DRIVE_STOP_COAST); DriveBase_SetLineFaultObservation(0,0,0);
     DriveBase_ClearFault();
     assert(!pins[0] && !pins[1] && !pins[2] && !pins[3]);
@@ -410,6 +442,7 @@ int main(void)
   test_position_coast_handoff(-1);
   test_real_search_capture();
   test_real_white_search();
+  test_no_motion_keeps_turn_effort();
   test_observe_faults();
   (void)trace(2500,-2500,0,1);
   for(i=0;i<4;++i) sample(creep);

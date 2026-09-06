@@ -99,7 +99,8 @@ void DriveBase_SetSideCps(int32_t left_cps, int32_t right_cps);
 void DriveBase_PrepareLineTurnAssist(int32_t left_cps, int32_t right_cps);
 
 /* Explicit line ownership. Encoder-derived speed faults are logged without
-   stopping; affected wheels use bounded feedforward until line mode reset.
+   stopping; direction/signal faults use bounded feedforward until mode reset.
+   Zero motion alone retains bounded PI and existing line-turn assistance.
    Position control never inherits this policy. Does not clear hard faults. */
 void DriveBase_SetLineFaultObservation(uint8_t enabled, uint8_t sensors,
                                       uint8_t recovery_state);

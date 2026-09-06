@@ -1064,7 +1064,11 @@ static void control_speed_mode(const int32_t delta[4],
         record.illegal_delta[motor] = fault_illegal_delta[motor];
         record.no_motion_ms[motor] = no_motion_ms[motor];
       }
-      line_degraded_mask |= (uint8_t)(fault_mask & 0x0FU);
+      /* Zero motion alone cannot distinguish load from missing feedback.
+         Retain bounded PI/load effort; otherwise a loaded wheel loses up to
+         1100 PWM exactly when it needs help. Only contradictory/noisy feedback
+         opts a wheel out of feedback control for the rest of this line run. */
+      line_degraded_mask |= (uint8_t)(direction_fault_mask | encoder_signal_fault_mask);
       record.degraded_mask = line_degraded_mask;
       record.sensor_mask = line_sensor_mask;
       record.recovery_state = line_recovery_state;
