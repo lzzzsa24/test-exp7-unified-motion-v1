@@ -11,22 +11,22 @@ or physical test.
 state_schema_version: 1
 state_updated_at: 2026-09-06
 integration_branch: feature/line-reacquire-lock
-repository_head_at_update: e630552
-latest_code_commit: 9ac30b0
-flashed_source_commit: 9ac30b0
-flash_record_commit: e630552
-deployed_tag: deployed/2026-09-06-persistent-search-fault-log
+repository_head_at_update: 913fbca
+latest_code_commit: eaa4b38
+flashed_source_commit: eaa4b38
+flash_record_commit: 913fbca
+deployed_tag: deployed/2026-09-06-stall-effort-retention
 formal_bin_path: manual-build-unified-motion/exp7_unified_motion.bin
 formal_hex_path: manual-build-unified-motion/exp7_unified_motion.hex
-formal_bin_size_bytes: 67524
-flashed_bin_sha256: 4F00813D7CA5E8232EAC0612FCAC24C2E0CA588A4DBD93810B69B1624A75B6A6
-flashed_hex_sha256: 7FEF2FEB83960E78FFC3AC5B7B1F2A9CC14150E5EC6DF36196DEDCB367F67B87
-ground_test_status: persistent_search_fault_log_flashed_ground_test_pending_buzzer_passed
+formal_bin_size_bytes: 67520
+flashed_bin_sha256: 260DAAA52238CBEFB1FB8C1AF402DA72DEF76C9991046F3445CFD649DF5E5F51
+flashed_hex_sha256: 3C786276081688AAB36DEE55B71F3FB52A4DBC19C1C27E95BFD0219CE396ECB3
+ground_test_status: stall_effort_retention_flashed_ground_test_pending_buzzer_passed
 k210_status: removed
-candidate_source_commit: 9ac30b0
-candidate_bin_size_bytes: 67524
-candidate_bin_sha256: 4F00813D7CA5E8232EAC0612FCAC24C2E0CA588A4DBD93810B69B1624A75B6A6
-candidate_hex_sha256: 7FEF2FEB83960E78FFC3AC5B7B1F2A9CC14150E5EC6DF36196DEDCB367F67B87
+candidate_source_commit: eaa4b38
+candidate_bin_size_bytes: 67520
+candidate_bin_sha256: 260DAAA52238CBEFB1FB8C1AF402DA72DEF76C9991046F3445CFD649DF5E5F51
+candidate_hex_sha256: 3C786276081688AAB36DEE55B71F3FB52A4DBC19C1C27E95BFD0219CE396ECB3
 user_reported_flash: tool_verified_current_candidate
 ```
 
@@ -38,22 +38,22 @@ checker requires the anchor to remain an ancestor and prints the live HEAD.
 
 - Repository: `F:\myproject\jidian\project\test-exp7-unified-motion-v1`
 - Integration branch: `feature/line-reacquire-lock`
-- Latest firmware source commit: `9ac30b0` (`Log line drive faults in RAM and continue with bounded wheel feedforward`), now flashed. It integrates the requested `eba56d0` plus prerequisite `3fcf4de` on top of the current integration history, retaining the position handoff fix, buzzer GPIO fix and IR centre-key audio.
-- Flash/readback record: `e630552` (`Record persistent-search fault-log firmware flash`).
+- Latest firmware source commit: `eaa4b38` (`Retain line turn effort when no-motion observations indicate possible load`), now flashed. It integrates the requested `435e6e2` on top of the current persistent-search/fault-log history, retaining the position handoff fix, buzzer GPIO fix and IR centre-key audio.
+- Flash/readback record: `913fbca` (`Record stall-effort retention firmware flash`).
 - The formal BIN above was rebuilt from the clean integration checkout, then
   written through the STM32 ROM bootloader on USB-SERIAL CH340K COM11 at
   57600 baud. Selective erase covered 33 firmware pages, preserved the final
-  calibration page, wrote and read back 67524 bytes with `VERIFY OK`, and
+  calibration page, wrote and read back 67520 bytes with `VERIFY OK`, and
   completed `GO OK: 0x08000000`.
 - Build products under `manual-build-*` are intentionally ignored by Git. A
   different computer must rebuild the named source commit rather than assume
   the artifact was transferred.
 - Current formal BIN/HEX were built in this integration checkout from
-  `9ac30b0`. The preceding adaptive-search build remains under
+  `eaa4b38`. The preceding adaptive-search build remains under
   `manual-build-adaptive-line-search`.
   Previous isolated candidates remain under the validation directory.
-- Immediate rollback tag: `rollback/2026-09-06-before-persistent-search-fault-observation`
-  points to `7a79682`. The buzzer GPIO fix and earlier adaptive-search rollback
+- Immediate rollback tag: `rollback/2026-09-06-before-stall-effort-retention`
+  points to `709af42`. The buzzer GPIO fix and earlier adaptive-search rollback
   points remain available.
 
 ## Current mode map
@@ -76,7 +76,7 @@ Latest user observations before this deployment (2026-09-05): KEY2 could emit
 The user then explicitly requested continued searching and fault observation
 instead of stopping the line mode.
 
-The deployed `9ac30b0` recovery changes KEY1/KEY2 as follows:
+The persistent recovery retained in deployed `eaa4b38` changes KEY1/KEY2 as follows:
 
 - On line loss it briefly brakes, then continuously rotates in the most recent
   reliable direction; without a hint it defaults left. Search uses equal and
@@ -98,7 +98,7 @@ The deployed `9ac30b0` recovery changes KEY1/KEY2 as follows:
 
 ## Current line-turn load assistance
 
-- Commit `63dbfe6`, retained in `9ac30b0`, keeps the requested four-wheel CPS targets and adds a
+- Commit `63dbfe6`, retained in `eaa4b38`, keeps the requested four-wheel CPS targets and adds a
   bounded PWM supplement only to an accepted line-tracking differential or
   counter-rotation command. Straight travel, wide-line travel, stop, encoder
   position retrace/rollback and non-line modes do not receive this supplement.
@@ -109,10 +109,12 @@ The deployed `9ac30b0` recovery changes KEY1/KEY2 as follows:
   ramped upward by at most 5 PWM per millisecond. Total output remains clamped
   to the existing 3599 hardware limit; the existing startup pulse has priority.
 - Reaching the 85-percent speed threshold, reverse feedback, a mismatched or
-  expired authorization, stop or position control clears the supplement. A
-  wheel degraded by the line-only observation policy also loses PI and load
-  assistance and uses bounded feedforward instead. Wheel-speed feedback is not
-  current or torque feedback, so ground traction remains untested.
+  expired authorization, stop or position control clears the supplement.
+  Direction/signal-degraded wheels also lose PI and load assistance and use
+  bounded feedforward. A no-motion observation alone now retains the bounded
+  PI and turn supplement so high ground resistance does not reduce effort.
+  Wheel-speed feedback is not current or torque feedback, so traction remains
+  untested.
 
 ## Current line-drive fault observation
 
@@ -120,11 +122,15 @@ The deployed `9ac30b0` recovery changes KEY1/KEY2 as follows:
   policy. Existing no-motion, wrong-direction and illegal-encoder thresholds
   are retained, but reaching them records an event instead of setting the
   blocking DriveBase fault mask or commanding a fault stop.
-- An affected wheel uses the existing voltage-compensated CPS-to-PWM mapping,
-  its continuous-drive PWM floor and the 3599 hardware ceiling. Its suspect
-  feedback no longer adds PI, load assistance or repeated startup boost. Other
-  wheels retain closed-loop control. This can keep a truly stalled motor
-  energized and is not torque or current control.
+- A wheel with wrong-direction or illegal-encoder observations uses the
+  existing voltage-compensated CPS-to-PWM mapping, continuous-drive PWM floor
+  and 3599 ceiling; its suspect feedback no longer adds PI, load assistance or
+  repeated startup boost. Other wheels retain closed-loop control.
+- A no-motion observation is still logged but no longer marks the wheel as
+  feedback-degraded. Its prior bounded PI and turn assistance remain active;
+  tests hold about 3529 PWM before and after the 1600 ms threshold in all four
+  wheel positions and both search directions. This can keep a truly stalled or
+  encoder-disconnected motor energized and is not torque or current control.
 - Other modes and position actions retain blocking drive faults. STOP or mode
   change clears the active degraded-wheel state but does not erase the log.
 - A 32-entry RAM ring stores event time, sensor/recovery state, battery value
@@ -138,7 +144,7 @@ The deployed `9ac30b0` recovery changes KEY1/KEY2 as follows:
 
 ## Current position-control handoff
 
-- Commit `b424189`, retained in `9ac30b0`, fixes the shared DriveBase transition from continuous
+- Commit `b424189`, retained in `eaa4b38`, fixes the shared DriveBase transition from continuous
   position-control PWM to the short-pulse region used near a target.
 - When an individual wheel enters that low-speed region, its previous
   continuous PWM is first set to zero and a fresh stop-settle window is
@@ -172,7 +178,7 @@ The deployed `9ac30b0` recovery changes KEY1/KEY2 as follows:
 - The serial `b` command remains an equivalent one-shot diagnostic entry.
 - After flashing `0d31f10`, the user short-pressed the intended sound button
   and explicitly confirmed audible output (`响了`). The same fix remains in
-  deployed `9ac30b0`.
+  deployed `eaa4b38`.
 
 ## Confirmed hardware facts
 
@@ -189,22 +195,22 @@ The deployed `9ac30b0` recovery changes KEY1/KEY2 as follows:
 
 | Evidence level | Current result | Scope |
 |---|---|---|
-| computer build/link | passed | integrated formal `9ac30b0`; BIN is 67524 bytes; buzzer fix retained |
-| host regression | passed | 2493/1870-CPS profiles pass persistent rotation, actual repeated phrase, capture/re-loss, STOP and wrap; real DriveBase tests pass 90-second search, line-only fault logging/degradation, bounded fallback, capture and retained blocking faults for other owners; 32-entry RAM log/coalescing/export tests pass; geometry self-test passes; MSVC /W4 /WX |
-| flash/readback/GO | passed | COM11 at 57600 baud; 33-page selective erase; calibration page preserved; 67524-byte write and readback; `VERIFY OK`; `GO OK` |
+| computer build/link | passed | integrated formal `eaa4b38`; BIN is 67520 bytes; buzzer fix retained |
+| host regression | passed | persistent search/audio/capture pass at 2493/1870 CPS; all four wheels and both search directions retain about 3529 PWM across no-motion observation while logging it; direction/signal fallback, STOP, other-owner blocking faults and 32-entry RAM log tests pass; geometry self-test passes; MSVC /W4 /WX |
+| flash/readback/GO | passed | CH340K COM11 at 57600 baud; 33-page selective erase; calibration page preserved; 67520-byte write and readback; `VERIFY OK`; `GO OK` |
 | physical buzzer | passed | user explicitly confirmed `响了` after the PG12 initialization fix; fix retained in current firmware |
 | wheels off ground | not performed this turn | diagnostic image compilation is not a lifted-wheel test |
-| ground driving | current persistent-search/fault-log firmware untested | indefinite rotation, repeated audio, degraded feedforward, capture, drift and motor heating require controlled observation |
+| ground driving | current stall-effort-retention firmware untested | indefinite rotation, retained no-motion effort, capture, drift and motor heating require controlled observation |
 
 ## Open issue and next safe step
 
-The requested persistent-search and RAM fault-observation integration, formal
-build, all host regressions, flash, readback verification and GO are complete.
-Physical buzzer output was confirmed on an earlier firmware; continuous repeat
-and ground motion are not yet physically verified. Test with room to rotate and
-the remote STOP ready. After any abnormal wheel behavior, press `0` and keep
-power connected so the RAM log can be exported with `f`. Do not leave a stalled
-motor energized. Use the immediate rollback point if behavior is unsafe.
+The requested no-motion effort-retention integration, formal build, all host
+regressions, flash, readback verification and GO are complete. Physical buzzer
+output was confirmed on an earlier firmware; continuous repeat and ground
+motion are not yet physically verified. Test with room to rotate and the remote
+STOP ready. After abnormal wheel behavior, press `0` and keep power connected
+so the RAM log can be exported with `f`. Do not leave a stalled motor energized.
+Use the immediate rollback point if behavior is unsafe.
 
 ## Update protocol
 
