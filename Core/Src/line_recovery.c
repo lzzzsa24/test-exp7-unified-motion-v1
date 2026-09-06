@@ -10,7 +10,7 @@ typedef enum { REC_IDLE, REC_BRAKE_SEARCH, REC_SEARCH, REC_BRAKE_CAPTURE,
                REC_CONFIRM_CAPTURE, REC_CAPTURED, REC_FAULT } RecoveryPhase;
 static RecoveryPhase phase;
 static int8_t side;
-static uint8_t center_candidate, audio_owned;
+static uint8_t center_candidate, audio_owned, audio_requested;
 static uint32_t phase_start, center_since;
 static LineRecoveryStopReason stop_reason;
 
@@ -18,6 +18,7 @@ static void stop_audio(void)
 {
   if (audio_owned) BuzzerPhrase400_Stop();
   audio_owned = 0U;
+  audio_requested = 0U;
 }
 static void search_audio(uint32_t now)
 {
@@ -63,13 +64,25 @@ void LineRecovery_Begin(int8_t preferred_side, uint32_t now)
     /* Claim this phrase only for active line recovery. Normal manual audio
        remains untouched by reset/commit when recovery did not own it. */
     audio_owned = BuzzerPhrase400_Start(1U);
+    audio_requested = 1U;
   }
+}
+void LineRecovery_BeginCorner(int8_t preferred_side, uint32_t now)
+{
+  side = preferred_side > 0 ? 1 : -1;
+  center_candidate = 0U;
+  stop_reason = LINE_REC_STOP_NONE;
+  phase = REC_SEARCH;
+  phase_start = now;
+  audio_requested = 0U;
+  if (DriveBase_GetFaultMask()) LineRecovery_Stop(LINE_REC_STOP_DRIVE_FAULT);
 }
 LineRecoveryResult LineRecovery_Step(const LineTrackingReading *r,
                                      LineTrackingCommand *command, uint32_t now)
 {
   DriveBaseTelemetry telemetry;
-  uint8_t visible = (r->x1_black || r->x3_black) && !(r->x2_black && r->x4_black);
+  /* An outer+inner pair is still an edge, not a completed turn. */
+  uint8_t visible = (r->x1_black || r->x3_black) && !r->x2_black && !r->x4_black;
   command->valid = 0U;
   command->left_cps = command->right_cps = 0;
   command->action = side < 0 ? LINE_ACTION_SEARCH_LEFT : LINE_ACTION_SEARCH_RIGHT;
@@ -77,7 +90,8 @@ LineRecoveryResult LineRecovery_Step(const LineTrackingReading *r,
   if (DriveBase_GetFaultMask()) LineRecovery_Stop(LINE_REC_STOP_DRIVE_FAULT);
   if (phase == REC_FAULT) return LINE_RECOVERY_FAILED;
   if (phase == REC_CAPTURED) return LINE_RECOVERY_CAPTURED;
-  search_audio(now);
+  if (!(r->x1_black || r->x2_black || r->x3_black || r->x4_black)) audio_requested = 1U;
+  if (audio_requested) search_audio(now);
   DriveBase_GetTelemetry(&telemetry);
 
   if (phase == REC_BRAKE_SEARCH || phase == REC_BRAKE_CAPTURE)
@@ -89,12 +103,20 @@ LineRecoveryResult LineRecovery_Step(const LineTrackingReading *r,
     phase_start = now;
     center_candidate = 0U;
   }
-  else if (phase == REC_SEARCH && visible)
+  else if (phase == REC_SEARCH)
   {
-    /* First middle hit brakes; only a stationary confirmed hit ends audio. */
-    DriveBase_Stop(DRIVE_STOP_BRAKE);
-    phase = REC_BRAKE_CAPTURE;
-    center_candidate = 0U;
+    /* Confirm while still turning, so a one-frame hit never drops torque. */
+    if (!visible) center_candidate = 0U;
+    else
+    {
+      if (!center_candidate) { center_candidate = 1U; center_since = now; }
+      if (now - center_since >= SENSOR_CONFIRM_MS)
+      {
+        DriveBase_Stop(DRIVE_STOP_BRAKE);
+        phase = REC_BRAKE_CAPTURE;
+        center_candidate = 0U;
+      }
+    }
   }
   else if (phase == REC_CONFIRM_CAPTURE)
   {
@@ -110,7 +132,11 @@ LineRecoveryResult LineRecovery_Step(const LineTrackingReading *r,
       }
     }
     /* A false hit resumes rotation. This timer never latches a stop. */
-    if (now - phase_start >= CAPTURE_STATIONARY_MS) phase = REC_SEARCH;
+    if (now - phase_start >= CAPTURE_STATIONARY_MS)
+    {
+      phase = REC_SEARCH;
+      center_candidate = 0U;
+    }
   }
   if (phase == REC_SEARCH)
   {

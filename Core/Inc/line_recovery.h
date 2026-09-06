@@ -18,6 +18,9 @@ void LineRecovery_Stop(LineRecoveryStopReason reason);
 
 void LineRecovery_Reset(void);
 void LineRecovery_Begin(int8_t preferred_side, uint32_t now);
+/* Latch an observed corner without a stop/roll/spin timer cycle. Existing
+   DriveBase ramps handle wheel reversal; audio starts only if all-white. */
+void LineRecovery_BeginCorner(int8_t preferred_side, uint32_t now);
 LineRecoveryResult LineRecovery_Step(const LineTrackingReading *reading,
                                      LineTrackingCommand *command, uint32_t now);
 void LineRecovery_Commit(void);

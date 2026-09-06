@@ -22,8 +22,6 @@ static uint32_t direction_last_seen_ms;
 static uint8_t direction_center_active;
 static uint32_t direction_center_since_ms;
 static int8_t recovery_turn_direction;
-static int8_t outer_turn_direction;
-static uint32_t outer_turn_started_ms;
 static uint8_t smooth_mode_enabled;
 static uint8_t smooth_filter_valid;
 static int16_t smooth_error_q8;
@@ -58,13 +56,6 @@ static uint32_t settle_center_since;
 #define TRACKING_SETTLE_OUTER_PWM           2400
 #define TRACKING_SETTLE_CENTER_PWM          2200
 #define TRACKING_NORMAL_CENTER_PWM          3000
-#define TRACKING_OUTER_ROLL_IN_MS            120U
-#define TRACKING_OUTER_SPIN_END_MS           280U
-#define TRACKING_OUTER_ROLL_INNER_PWM       2200
-#define TRACKING_OUTER_ROLL_OUTER_PWM       3400
-#define TRACKING_OUTER_SPIN_PWM             3000
-#define TRACKING_OUTER_ARC_INNER_PWM        2100
-#define TRACKING_OUTER_ARC_OUTER_PWM        3300
 #define TRACKING_SMOOTH_UPDATE_MS              10U
 #define TRACKING_SMOOTH_STEER_LIMIT          1400
 #define TRACKING_SMOOTH_STEER_DEADBAND        100
@@ -245,8 +236,6 @@ void line_tracking_reset(void)
   direction_last_seen_ms = HAL_GetTick();
   direction_center_since_ms = HAL_GetTick();
   recovery_turn_direction = 0;
-  outer_turn_direction = 0;
-  outer_turn_started_ms = HAL_GetTick();
   smooth_filter_valid = 0U;
   smooth_error_q8 = 0;
   smooth_previous_error_q8 = 0;
@@ -350,6 +339,20 @@ LineTrackingAction line_tracking_compute(const LineTrackingReading *reading,
     recovery_stop(LINE_REC_STOP_DRIVE_FAULT);
     return LINE_ACTION_STOP;
   }
+  if ((recovery_state == LINE_RECOVERY_NORMAL || recovery_state == LINE_RECOVERY_SETTLE) &&
+      ((reading->x2_black && !reading->x3_black && !reading->x4_black) ||
+       (reading->x4_black && !reading->x1_black && !reading->x2_black)))
+  {
+    /* Outer-only or same-side pair starts one continuous turn. The recovery
+       owner holds direction across edge/white chatter until middle capture. */
+    recovery_turn_direction = reading->x2_black ? -1 : 1;
+    settle_center_valid = 0U;
+    smooth_filter_valid = 0U;
+    smooth_centered_active = 0U;
+    smooth_straight_pwm = TRACKING_SMOOTH_STRAIGHT_BASE_PWM;
+    LineRecovery_BeginCorner(recovery_turn_direction, now);
+    recovery_state = LINE_RECOVERY_ACTIVE;
+  }
   if (recovery_state == LINE_RECOVERY_ACTIVE)
   {
     LineRecoveryResult result = LineRecovery_Step(reading, command, now);
@@ -374,7 +377,6 @@ LineTrackingAction line_tracking_compute(const LineTrackingReading *reading,
   }
   if (active_count == 0U)
   {
-    outer_turn_direction = 0;
     smooth_filter_valid = 0U;
     smooth_centered_active = 0U;
     smooth_straight_pwm = TRACKING_SMOOTH_STRAIGHT_BASE_PWM;
@@ -398,7 +400,7 @@ LineTrackingAction line_tracking_compute(const LineTrackingReading *reading,
   }
   if (recovery_state == LINE_RECOVERY_SETTLE)
   {
-    if (center_visible && !(reading->x2_black && reading->x4_black))
+    if (center_visible && !reading->x2_black && !reading->x4_black)
     {
       if (!settle_center_valid) { settle_center_valid = 1U; settle_center_since = now; }
     }
@@ -415,8 +417,8 @@ LineTrackingAction line_tracking_compute(const LineTrackingReading *reading,
   }
   if (settling)
   {
-    /* Keep the newly found edge under slow forward steering; an outer-only
-       hit here is guidance, not permission to restart high-power spinning. */
+    /* Single-side outer evidence already returned to continuous turning.
+       Middle and ambiguous/crossing patterns receive low-speed guidance. */
     weighted_sum = (int16_t)(-3 * reading->x2_black - reading->x1_black +
                              reading->x3_black + 3 * reading->x4_black);
     if (reading->x2_black && reading->x4_black)
@@ -446,7 +448,6 @@ LineTrackingAction line_tracking_compute(const LineTrackingReading *reading,
   /* 两个外侧探头同时压线或四路全黑，通常是宽线/交叉口。 */
   if ((reading->x2_black && reading->x4_black) || active_count == 4U)
   {
-    outer_turn_direction = 0;
     smooth_filter_valid = 0U;
     smooth_centered_active = 0U;
     smooth_straight_pwm = TRACKING_SMOOTH_STRAIGHT_BASE_PWM;
@@ -462,47 +463,6 @@ LineTrackingAction line_tracking_compute(const LineTrackingReading *reading,
     weighted_sum = (int16_t)(-3 * reading->x2_black - reading->x1_black +
                               reading->x3_black + 3 * reading->x4_black);
     line_position = weighted_sum / active_count;
-
-    if (line_position <= -2)
-    {
-      smooth_filter_valid = 0U;
-      smooth_centered_active = 0U;
-      smooth_straight_pwm = TRACKING_SMOOTH_STRAIGHT_BASE_PWM;
-      /* 四轮车从静止直接原地转向需要克服较大横向摩擦。先用 140 ms
-         强差速滚动建立角速度，再切到高 PWM 原地转向。 */
-      if (outer_turn_direction != -1)
-      {
-        outer_turn_direction = -1;
-        outer_turn_started_ms = now;
-      }
-      if (now - outer_turn_started_ms < TRACKING_OUTER_ROLL_IN_MS)
-      {
-        command_set_pwm(command,
-                        TRACKING_OUTER_ROLL_INNER_PWM,
-                        turn_speed_for_gain(
-                            TRACKING_OUTER_ROLL_OUTER_PWM),
-                        LINE_ACTION_LEFT_SHARP);
-      }
-      else if (now - outer_turn_started_ms < TRACKING_OUTER_SPIN_END_MS)
-      {
-        {
-          int16_t spin = turn_speed_for_gain(TRACKING_OUTER_SPIN_PWM);
-          command_set_pwm(command, (int16_t)-spin, spin,
-                          LINE_ACTION_LEFT_SHARP);
-        }
-      }
-      else
-      {
-        /* 转角已经建立后改回高曲率前进，避免整个弯道都原地磨轮。 */
-        command_set_pwm(command,
-                        TRACKING_OUTER_ARC_INNER_PWM,
-                        turn_speed_for_gain(
-                            TRACKING_OUTER_ARC_OUTER_PWM),
-                        LINE_ACTION_LEFT_SHARP);
-      }
-      return LINE_ACTION_LEFT_SHARP;
-    }
-
 
     if (smooth_mode_enabled != 0U && settling == 0U &&
         line_position > -2 && line_position < 2)
@@ -601,7 +561,6 @@ LineTrackingAction line_tracking_compute(const LineTrackingReading *reading,
       right_target = ensure_minimum_speed(right_target,
                                           TRACKING_MIN_INNER_PWM);
 
-      outer_turn_direction = 0;
       if (steering < -TRACKING_SMOOTH_STEER_DEADBAND)
       {
         command_set_pwm(command, left_target, right_target,
@@ -624,59 +583,17 @@ LineTrackingAction line_tracking_compute(const LineTrackingReading *reading,
 
     if (line_position < 0)
     {
-      outer_turn_direction = 0;
       command_set_pwm(command, turn_inner_speed, turn_outer_speed,
                       LINE_ACTION_LEFT_ADJUST);
       return LINE_ACTION_LEFT_ADJUST;
     }
 
-    if (line_position >= 2)
-    {
-      smooth_filter_valid = 0U;
-      smooth_centered_active = 0U;
-      smooth_straight_pwm = TRACKING_SMOOTH_STRAIGHT_BASE_PWM;
-      if (outer_turn_direction != 1)
-      {
-        outer_turn_direction = 1;
-        outer_turn_started_ms = now;
-      }
-      if (now - outer_turn_started_ms < TRACKING_OUTER_ROLL_IN_MS)
-      {
-        command_set_pwm(command,
-                        turn_speed_for_gain(
-                            TRACKING_OUTER_ROLL_OUTER_PWM),
-                        TRACKING_OUTER_ROLL_INNER_PWM,
-                        LINE_ACTION_RIGHT_SHARP);
-      }
-      else if (now - outer_turn_started_ms < TRACKING_OUTER_SPIN_END_MS)
-      {
-        {
-          int16_t spin = turn_speed_for_gain(TRACKING_OUTER_SPIN_PWM);
-          command_set_pwm(command, spin, (int16_t)-spin,
-                          LINE_ACTION_RIGHT_SHARP);
-        }
-      }
-      else
-      {
-        command_set_pwm(command,
-                        turn_speed_for_gain(
-                            TRACKING_OUTER_ARC_OUTER_PWM),
-                        TRACKING_OUTER_ARC_INNER_PWM,
-                        LINE_ACTION_RIGHT_SHARP);
-      }
-      return LINE_ACTION_RIGHT_SHARP;
-    }
-
     if (line_position > 0)
     {
-      outer_turn_direction = 0;
       command_set_pwm(command, turn_outer_speed, turn_inner_speed,
                       LINE_ACTION_RIGHT_ADJUST);
       return LINE_ACTION_RIGHT_ADJUST;
     }
-
-    outer_turn_direction = 0;
-
     command_set_pwm(command, center_speed, center_speed,
                     LINE_ACTION_FORWARD);
     return LINE_ACTION_FORWARD;
