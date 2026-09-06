@@ -12,7 +12,7 @@ static uint32_t tick, brake_started;
 static DriveBaseTelemetry telemetry;
 static LineTrackingCommand output;
 static GPIO_PinState buzzer;
-static unsigned attacks, spins, reversals;
+static unsigned attacks, spins, reversals, brakes;
 static int32_t previous_spin;
 uint32_t HAL_GetTick(void) { return tick; }
 int HAL_GPIO_ReadPin(GPIO_TypeDef *p,uint16_t n) { (void)p; (void)n; return 1; }
@@ -29,6 +29,7 @@ void DriveBase_Task(uint32_t now)
 { if(telemetry.mode==DRIVE_BASE_BRAKING && now-brake_started>=52) telemetry.mode=DRIVE_BASE_STOPPED; }
 void DriveBase_Stop(DriveStopMode mode)
 {
+  if(mode==DRIVE_STOP_BRAKE) ++brakes;
   telemetry.mode=mode==DRIVE_STOP_BRAKE?DRIVE_BASE_BRAKING:DRIVE_BASE_STOPPED;
   brake_started=tick; memset(telemetry.requested_cps,0,sizeof telemetry.requested_cps);
 }
@@ -65,7 +66,7 @@ static void hold(unsigned mask,uint32_t ms)
 static void reset(uint8_t forward,uint8_t smooth)
 {
   line_tracking_reset(); memset(&telemetry,0,sizeof telemetry); BuzzerPhrase400_Init();
-  attacks=spins=reversals=0; previous_spin=0;
+  attacks=spins=reversals=brakes=0; previous_spin=0;
   line_tracking_set_no_line_forward(forward); line_tracking_set_smooth_mode(smooth);
 }
 static void assert_search(void)
@@ -73,9 +74,49 @@ static void assert_search(void)
   assert(!output.valid && telemetry.mode==DRIVE_BASE_SPEED && BuzzerPhrase400_IsPlaying());
   assert(telemetry.requested_cps[0]==-telemetry.requested_cps[2] && spins && !reversals);
 }
+static void test_corner_edge_chatter(void)
+{
+  unsigned smooth,side,i;
+  for(smooth=0;smooth<2;++smooth) for(side=0;side<2;++side)
+  {
+    unsigned outer=side?8:2, pair=side?12:3, before;
+    reset(0,(uint8_t)smooth); hold(5,300); hold(outer,600);
+    printf("corner side=%u after 600ms: left=%ld right=%ld\n",side,
+           (long)telemetry.requested_cps[0],(long)telemetry.requested_cps[2]);
+    fflush(stdout);
+    assert(telemetry.requested_cps[0]*telemetry.requested_cps[2]<0);
+    assert(!BuzzerPhrase400_IsPlaying()); /* Outer contact is a turn, not yet loss. */
+    before=brakes;
+    for(i=0;i<100;++i)
+    {
+      hold(0,30); hold(outer,30); hold(pair,30);
+      assert(!output.valid && telemetry.mode==DRIVE_BASE_SPEED);
+      assert(telemetry.requested_cps[0]==(side?LINE_SEARCH_TARGET_CPS:-LINE_SEARCH_TARGET_CPS));
+      assert(brakes==before && BuzzerPhrase400_IsPlaying());
+    }
+    for(i=0;i<20;++i)
+    {
+      sample(5,10,3000); hold(outer,30); /* Fleeting inner hit must not brake. */
+      assert(brakes==before && telemetry.mode==DRIVE_BASE_SPEED);
+    }
+    hold(15,100); assert(brakes==before); /* Crossing is not middle capture. */
+    hold(5,180); assert(brakes==before+1 && output.left_cps>0 && output.right_cps>0);
+    assert(!BuzzerPhrase400_IsPlaying());
+    /* If low-speed capture falls back to the edge, restore a continuous turn
+       without another stationary confirmation pause on that outer sensor. */
+    hold(outer,30); assert(brakes==before+1 && !output.valid);
+    assert(telemetry.requested_cps[0]==(side?LINE_SEARCH_TARGET_CPS:-LINE_SEARCH_TARGET_CPS));
+    hold(0,30); hold(pair,300); assert(brakes==before+1);
+    assert(BuzzerPhrase400_IsPlaying());
+    hold(5,180); assert(brakes==before+2 && !BuzzerPhrase400_IsPlaying());
+    hold(5,550); assert(output.left_cps>2400);
+    line_tracking_reset();
+  }
+}
 int main(void)
 {
   unsigned smooth,forward,i;
+  test_corner_edge_chatter();
   for(smooth=0;smooth<=1;++smooth) for(forward=0;forward<=1;++forward)
   {
     reset((uint8_t)forward,(uint8_t)smooth); hold(5,300); sample(0,10,3000);
@@ -83,11 +124,11 @@ int main(void)
     hold(0,90000); assert_search(); assert(attacks>250); /* Beyond 8 s and 24 phrase repeats. */
     hold(2,10000); assert_search(); hold(8,10000); assert_search();
     hold(15,1000); assert_search(); /* Wide crossing is not a confirmed middle line. */
-    sample(5,10,3000); assert(telemetry.mode==DRIVE_BASE_BRAKING);
+    sample(5,10,3000); assert(telemetry.mode==DRIVE_BASE_SPEED);
     hold(0,200); assert_search(); /* False contact resumes, never latches stop. */
     hold(5,180); assert(output.valid && output.left_cps>0 && !BuzzerPhrase400_IsPlaying() && !buzzer);
-    hold(2,2000); assert(output.left_cps>0 && output.right_cps>0); /* No 800-ms capture stop. */
-    hold(5,550); assert(output.left_cps>2400 && !BuzzerPhrase400_IsPlaying());
+    hold(2,2000); assert(!output.valid && telemetry.requested_cps[0]<0 && telemetry.requested_cps[2]>0);
+    hold(5,750); assert(output.left_cps>2400 && !BuzzerPhrase400_IsPlaying());
     sample(0,10,3000); hold(0,100); assert_search();
     /* Same cancellation hook that main calls on remote STOP / mode handoff. */
     line_tracking_reset(); assert(telemetry.mode==DRIVE_BASE_STOPPED && !BuzzerPhrase400_IsPlaying() && !buzzer);
