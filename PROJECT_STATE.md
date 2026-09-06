@@ -11,22 +11,22 @@ or physical test.
 state_schema_version: 1
 state_updated_at: 2026-09-06
 integration_branch: feature/line-reacquire-lock
-repository_head_at_update: 913fbca
-latest_code_commit: eaa4b38
-flashed_source_commit: eaa4b38
-flash_record_commit: 913fbca
-deployed_tag: deployed/2026-09-06-stall-effort-retention
+repository_head_at_update: 10831ff
+latest_code_commit: 3e943d2
+flashed_source_commit: 3e943d2
+flash_record_commit: 10831ff
+deployed_tag: deployed/2026-09-06-outer-chatter-corner-hold
 formal_bin_path: manual-build-unified-motion/exp7_unified_motion.bin
 formal_hex_path: manual-build-unified-motion/exp7_unified_motion.hex
-formal_bin_size_bytes: 67520
-flashed_bin_sha256: 260DAAA52238CBEFB1FB8C1AF402DA72DEF76C9991046F3445CFD649DF5E5F51
-flashed_hex_sha256: 3C786276081688AAB36DEE55B71F3FB52A4DBC19C1C27E95BFD0219CE396ECB3
-ground_test_status: stall_effort_retention_flashed_ground_test_pending_buzzer_passed
+formal_bin_size_bytes: 67440
+flashed_bin_sha256: 24AD5084787DD16BD08F2AB735A6BC2F3803D0B847D623E8C66DBDDA6099271E
+flashed_hex_sha256: 01A778FC8CEFADD177F7903B19D0F6CD70686113AE0F67A991A83409BD7BB5CB
+ground_test_status: outer_chatter_corner_hold_flashed_ground_test_pending_buzzer_passed
 k210_status: removed
-candidate_source_commit: eaa4b38
-candidate_bin_size_bytes: 67520
-candidate_bin_sha256: 260DAAA52238CBEFB1FB8C1AF402DA72DEF76C9991046F3445CFD649DF5E5F51
-candidate_hex_sha256: 3C786276081688AAB36DEE55B71F3FB52A4DBC19C1C27E95BFD0219CE396ECB3
+candidate_source_commit: 3e943d2
+candidate_bin_size_bytes: 67440
+candidate_bin_sha256: 24AD5084787DD16BD08F2AB735A6BC2F3803D0B847D623E8C66DBDDA6099271E
+candidate_hex_sha256: 01A778FC8CEFADD177F7903B19D0F6CD70686113AE0F67A991A83409BD7BB5CB
 user_reported_flash: tool_verified_current_candidate
 ```
 
@@ -38,22 +38,22 @@ checker requires the anchor to remain an ancestor and prints the live HEAD.
 
 - Repository: `F:\myproject\jidian\project\test-exp7-unified-motion-v1`
 - Integration branch: `feature/line-reacquire-lock`
-- Latest firmware source commit: `eaa4b38` (`Retain line turn effort when no-motion observations indicate possible load`), now flashed. It integrates the requested `435e6e2` on top of the current persistent-search/fault-log history, retaining the position handoff fix, buzzer GPIO fix and IR centre-key audio.
-- Flash/readback record: `913fbca` (`Record stall-effort retention firmware flash`).
+- Latest firmware source commit: `3e943d2` (`Keep corner rotation through outer-line chatter until stable middle capture`), now flashed. It integrates the requested `731de65` on top of the current persistent-search/fault-log history, retaining stall-effort assistance, the position handoff fix, buzzer GPIO fix and IR centre-key audio.
+- Flash/readback record: `10831ff` (`Record outer-chatter corner-hold firmware flash`).
 - The formal BIN above was rebuilt from the clean integration checkout, then
   written through the STM32 ROM bootloader on USB-SERIAL CH340K COM11 at
   57600 baud. Selective erase covered 33 firmware pages, preserved the final
-  calibration page, wrote and read back 67520 bytes with `VERIFY OK`, and
+  calibration page, wrote and read back 67440 bytes with `VERIFY OK`, and
   completed `GO OK: 0x08000000`.
 - Build products under `manual-build-*` are intentionally ignored by Git. A
   different computer must rebuild the named source commit rather than assume
   the artifact was transferred.
 - Current formal BIN/HEX were built in this integration checkout from
-  `eaa4b38`. The preceding adaptive-search build remains under
+  `3e943d2`. The preceding adaptive-search build remains under
   `manual-build-adaptive-line-search`.
   Previous isolated candidates remain under the validation directory.
-- Immediate rollback tag: `rollback/2026-09-06-before-stall-effort-retention`
-  points to `709af42`. The buzzer GPIO fix and earlier adaptive-search rollback
+- Immediate rollback tag: `rollback/2026-09-06-before-outer-chatter-hold`
+  points to `f9ab71d`. The buzzer GPIO fix and earlier adaptive-search rollback
   points remain available.
 
 ## Current mode map
@@ -76,7 +76,7 @@ Latest user observations before this deployment (2026-09-05): KEY2 could emit
 The user then explicitly requested continued searching and fault observation
 instead of stopping the line mode.
 
-The persistent recovery retained in deployed `eaa4b38` changes KEY1/KEY2 as follows:
+The persistent recovery retained in deployed `3e943d2` changes KEY1/KEY2 as follows:
 
 - On line loss it briefly brakes, then continuously rotates in the most recent
   reliable direction; without a hint it defaults left. Search uses equal and
@@ -92,13 +92,25 @@ The persistent recovery retained in deployed `eaa4b38` changes KEY1/KEY2 as foll
 - Outer-only and all-four-black input cannot directly complete capture. Manual
   STOP, mode change or zero base-speed still stop motion and cancel the phrase;
   power-on still enters STOP.
+- During normal tracking or low-speed capture, a single outer sensor, or that
+  outer sensor together with the adjacent middle sensor, locks the matching
+  turn direction and enters continuous counter-rotation. Outer/white chatter
+  then cannot restart braking or reverse the search direction.
+- While that turn is locked, any outer sensor still seeing black keeps the
+  counter-rotation active. Only when both outer sensors are white and at least
+  one middle sensor remains black for 20 ms does braking and stationary capture
+  begin. A failed 80 ms stationary confirmation resumes the same turn.
+- The old 120/280 ms sharp-corner phases and weak forward arc are removed.
+  Corner rotation uses the same 2493-CPS search target; ordinary shallow-curve
+  steering and normal straight speed are unchanged. Online corner entry does
+  not start the buzzer until the sensors become all-white.
 - Persistent rotation is intentionally unbounded at the recovery layer and can
   drift or heat a physically stalled motor. Encoder wheel speed does not prove
   chassis rotation or guarantee that the line will be found.
 
 ## Current line-turn load assistance
 
-- Commit `63dbfe6`, retained in `eaa4b38`, keeps the requested four-wheel CPS targets and adds a
+- Commit `63dbfe6`, retained in `3e943d2`, keeps the requested four-wheel CPS targets and adds a
   bounded PWM supplement only to an accepted line-tracking differential or
   counter-rotation command. Straight travel, wide-line travel, stop, encoder
   position retrace/rollback and non-line modes do not receive this supplement.
@@ -144,7 +156,7 @@ The persistent recovery retained in deployed `eaa4b38` changes KEY1/KEY2 as foll
 
 ## Current position-control handoff
 
-- Commit `b424189`, retained in `eaa4b38`, fixes the shared DriveBase transition from continuous
+- Commit `b424189`, retained in `3e943d2`, fixes the shared DriveBase transition from continuous
   position-control PWM to the short-pulse region used near a target.
 - When an individual wheel enters that low-speed region, its previous
   continuous PWM is first set to zero and a fresh stop-settle window is
@@ -178,7 +190,7 @@ The persistent recovery retained in deployed `eaa4b38` changes KEY1/KEY2 as foll
 - The serial `b` command remains an equivalent one-shot diagnostic entry.
 - After flashing `0d31f10`, the user short-pressed the intended sound button
   and explicitly confirmed audible output (`响了`). The same fix remains in
-  deployed `eaa4b38`.
+  deployed `3e943d2`.
 
 ## Confirmed hardware facts
 
@@ -195,22 +207,24 @@ The persistent recovery retained in deployed `eaa4b38` changes KEY1/KEY2 as foll
 
 | Evidence level | Current result | Scope |
 |---|---|---|
-| computer build/link | passed | integrated formal `eaa4b38`; BIN is 67520 bytes; buzzer fix retained |
-| host regression | passed | persistent search/audio/capture pass at 2493/1870 CPS; all four wheels and both search directions retain about 3529 PWM across no-motion observation while logging it; direction/signal fallback, STOP, other-owner blocking faults and 32-entry RAM log tests pass; geometry self-test passes; MSVC /W4 /WX |
-| flash/readback/GO | passed | CH340K COM11 at 57600 baud; 33-page selective erase; calibration page preserved; 67520-byte write and readback; `VERIFY OK`; `GO OK` |
+| computer build/link | passed | integrated formal `3e943d2`; BIN is 67440 bytes; buzzer fix retained |
+| host regression | passed | 2493/1870-CPS left/right corner tests retain counter-rotation through outer/white chatter beyond 600 ms and capture only on stable middle input; persistent audio/search, all-wheel no-motion effort, direction/signal fallback, STOP, other-owner faults and RAM log tests pass; geometry self-test passes; MSVC /W4 /WX |
+| flash/readback/GO | passed | CH340K COM11 at 57600 baud; 33-page selective erase; calibration page preserved; 67440-byte write and readback; `VERIFY OK`; `GO OK` |
 | physical buzzer | passed | user explicitly confirmed `响了` after the PG12 initialization fix; fix retained in current firmware |
 | wheels off ground | not performed this turn | diagnostic image compilation is not a lifted-wheel test |
-| ground driving | current stall-effort-retention firmware untested | indefinite rotation, retained no-motion effort, capture, drift and motor heating require controlled observation |
+| ground driving | current outer-chatter corner-hold firmware untested | continuous corner rotation, retained no-motion effort, capture, drift and motor heating require controlled observation |
 
 ## Open issue and next safe step
 
-The requested no-motion effort-retention integration, formal build, all host
+The requested outer-chatter corner-hold integration, formal build, all host
 regressions, flash, readback verification and GO are complete. Physical buzzer
-output was confirmed on an earlier firmware; continuous repeat and ground
-motion are not yet physically verified. Test with room to rotate and the remote
-STOP ready. After abnormal wheel behavior, press `0` and keep power connected
-so the RAM log can be exported with `f`. Do not leave a stalled motor energized.
-Use the immediate rollback point if behavior is unsafe.
+output was confirmed on an earlier firmware; continuous corner behavior and
+ground motion are not yet physically verified. Test left and right bends with
+the remote STOP ready, checking that outer-sensor chatter no longer interrupts
+the turn and that stable middle sensing exits it. After abnormal wheel behavior,
+press `0` and keep power connected so the RAM log can be exported with `f`.
+Do not leave a stalled motor energized. Use the immediate rollback point if
+behavior is unsafe.
 
 ## Update protocol
 
